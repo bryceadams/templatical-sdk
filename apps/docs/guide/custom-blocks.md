@@ -51,7 +51,7 @@ const editor = await init({
                         color: #333; line-height: 1.5;">"{{ quote }}"</p>
               <table cellpadding="0" cellspacing="0">
                 <tr>
-                  {% if avatar %}
+                  {% if avatar != blank %}
                     <td style="vertical-align: middle; padding-right: 12px;">
                       <img src="{{ avatar }}" width="40" height="40"
                            style="border-radius: 50%; display: block;"
@@ -62,7 +62,7 @@ const editor = await init({
                     <p style="margin: 0; font-weight: 600; font-size: 14px;">
                       {{ authorName }}
                     </p>
-                    {% if authorTitle %}
+                    {% if authorTitle != blank %}
                       <p style="margin: 2px 0 0; font-size: 13px; color: #666;">
                         {{ authorTitle }}
                       </p>
@@ -384,6 +384,18 @@ The `template` property uses [Liquid](https://liquidjs.com/) syntax. Field value
 {% endif %}
 ```
 
+**Optional text and image fields:**
+
+```liquid
+{% if avatar != blank %}
+  <img src="{{ avatar }}" alt="{{ authorName }}" width="40" />
+{% endif %}
+```
+
+::: tip
+Liquid treats an empty string as true, and a field the user cleared holds an empty string. Compare against `blank` so the condition also hides a cleared field: a bare `{% if avatar %}` renders an `<img>` with an empty `src`.
+:::
+
 **Loops** (for repeatable fields):
 
 ```liquid
@@ -504,8 +516,8 @@ const eventCard: CustomBlockDefinition = {
   template: `
     <div style="border-left: 4px solid {{ accentColor }}; padding: 16px 20px; font-family: sans-serif;">
       <h2 style="margin: 0 0 4px; font-size: 20px;">{{ eventName }}</h2>
-      <p style="color: #666; margin: 0 0 12px; font-size: 14px;">{{ date }}{% if venue %} &middot; {{ venue }}{% endif %}</p>
-      {% if venueAddress %}
+      <p style="color: #666; margin: 0 0 12px; font-size: 14px;">{{ date }}{% if venue != blank %} &middot; {{ venue }}{% endif %}</p>
+      {% if venueAddress != blank %}
         <p style="color: #999; margin: 0 0 16px; font-size: 13px;">{{ venueAddress }}</p>
       {% endif %}
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px;">
@@ -516,7 +528,7 @@ const eventCard: CustomBlockDefinition = {
         </tr>
         {% endfor %}
       </table>
-      {% if rsvpUrl %}
+      {% if rsvpUrl != blank %}
         <a href="{{ rsvpUrl }}" style="display: inline-block; padding: 10px 24px; background: {{ accentColor }}; color: #fff; text-decoration: none; border-radius: 6px; font-size: 14px;">RSVP Now</a>
       {% endif %}
     </div>
@@ -563,7 +575,7 @@ const pricingTier: CustomBlockDefinition = {
         </tr>
         {% endfor %}
       </table>
-      {% if ctaUrl %}
+      {% if ctaUrl != blank %}
         <a href="{{ ctaUrl }}" style="display: inline-block; padding: 10px 24px; background: {{ accentColor }}; color: #fff; text-decoration: none; border-radius: 6px; font-size: 14px;">{{ ctaLabel }}</a>
       {% endif %}
     </div>
@@ -599,8 +611,37 @@ dataSource: {
 },
 ```
 
+## Rendering outside the editor
+
+`editor.toMjml()` and the editor's calls to a [`render` provider](/backend/render) resolve every custom block to HTML before rendering, and the payload carries each block's stylesheet with it, so `renderToMjml(payload.content)` needs no options. Template JSON from `getContent()` or a `templates` provider's `save` holds field values, not HTML, so a server that renders a saved template on its own needs the definitions too. Pass `renderCustomBlock` and `getCustomBlockStylesheet` to `renderToMjml`, from a module the editor and the server both import:
+
+```ts
+import { Liquid } from 'liquidjs';
+import { renderToMjml } from '@templatical/renderer';
+import { testimonial } from './custom-blocks/testimonial';
+
+const definitions = new Map([[testimonial.type, testimonial]]);
+const liquid = new Liquid();
+
+const mjml = await renderToMjml(content, {
+  renderCustomBlock: async (block) => {
+    const definition = definitions.get(block.customType);
+    return definition
+      ? liquid.parseAndRender(definition.template, block.fieldValues)
+      : '';
+  },
+  getCustomBlockStylesheet: (type) => definitions.get(type)?.stylesheet,
+});
+```
+
+Without `renderCustomBlock`, a custom block is left out of the output, and without `getCustomBlockStylesheet` its `stylesheet` is. `dataSource.onFetch` runs only in the editor; the server renders the saved field values.
+
 ## In the playground
 
 The **Custom blocks** setup registers one block type, which appears on the palette next to the built-in ones.
 
 [Open in playground](https://play.templatical.com/scenes/custom-blocks)
+
+## With the Agent Skill
+
+The [Agent Skill](/guide/agent-skill) defines a custom block from a description, previews it live and writes it into your codebase.

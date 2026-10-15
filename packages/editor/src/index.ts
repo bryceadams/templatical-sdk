@@ -1307,6 +1307,8 @@ function createEditorInstance({
         getContent: () => instance.getContent(),
         renderCustomBlock: (block: CustomBlock) =>
           instance.renderCustomBlock(block),
+        getCustomBlockStylesheet: (customType: string) =>
+          instance.getCustomBlockStylesheet(customType),
         getFonts: () => resolveRenderFonts(fontsManager),
         getLayout: () => config.layout,
       }),

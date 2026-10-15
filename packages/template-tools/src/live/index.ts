@@ -19,6 +19,23 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createDefaultTemplateContent,
+  type TemplateContent,
+} from "@templatical/types";
+import {
+  buildSpecimen,
+  buildSpecimenTemplate,
+  checkRecipe,
+  runRecipe,
+  validateCustomBlockDefinition,
+  type CustomBlockWorkingFile,
+} from "../custom-block";
+import {
+  fetchedSpecimenBlocks,
+  type FetchedSpecimen,
+} from "../custom-block/specimen";
+import { validateTemplate } from "../validate";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -101,6 +118,7 @@ async function readJsonBody(req: NodeJS.ReadableStream): Promise<
       label?: unknown;
       text?: string;
       consumeAnnotations?: boolean;
+      fieldValues?: unknown;
     }
   | undefined
 > {
@@ -137,9 +155,34 @@ export function openBrowser(url: string): void {
 // not need them)
 // --------------------------------------------------------------------------
 
+export type LiveMode = "template" | "custom-block";
+
 export interface PidfileInfo {
   pid: number;
   port: number;
+  /** Absent in a pidfile from a template-only bridge; read as "template". */
+  mode?: LiveMode;
+  /** The absolute path the server is serving. */
+  path?: string;
+  /** Custom-block mode: the absolute --host template, when one was given. */
+  host?: string;
+  /** Custom-block mode with --fetch: the --values the recipe runs with. */
+  fetch?: Record<string, unknown>;
+}
+
+/** How the data-source request for the fetched specimen state went. */
+export type FetchSummary =
+  { ok: true; unmapped: string[] } | { ok: false; error: string };
+
+/** What a reload pushed, and why it pushed nothing when `ok` is false. */
+export interface ReloadResult {
+  ok: boolean;
+  clients: number;
+  consumed: boolean;
+  mode: LiveMode;
+  error?: string;
+  /** With the `fetch` option: the request behind the fetched state. */
+  fetch?: FetchSummary;
 }
 
 export function pidfilePath(cwd: string): string {
@@ -223,6 +266,10 @@ function annotationIdFromPath(pathname: string): string | null {
   }
 }
 
+function loopbackNames(port: number): string[] {
+  return [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
+}
+
 function noteNotFound(res: ServerResponse): void {
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("No note with that id.");
@@ -245,11 +292,9 @@ export interface BridgeHandle {
     annotations: Annotation[];
   };
   /** Re-read the working file and push it to every connected page. */
-  reload: (options?: { consumeAnnotations?: boolean }) => {
-    ok: boolean;
-    clients: number;
-    consumed: boolean;
-  };
+  reload: (options?: { consumeAnnotations?: boolean }) => ReloadResult;
+  /** With the `fetch` option: the last data-source request's outcome. */
+  lastFetch: () => FetchSummary | null;
   close: () => Promise<void>;
 }
 
@@ -258,6 +303,20 @@ export interface StartBridgeOptions {
   port?: number;
   file?: string;
   harnessFile?: string;
+  /** Custom-block mode: serve this definition's specimen instead of a template. */
+  customBlock?: string;
+  /** Custom-block mode only: a template the specimen is appended to. */
+  host?: string;
+  /** Environment the data-source recipe resolves `${env:…}` from. Defaults to process.env. */
+  env?: Record<string, string | undefined>;
+  /**
+   * Custom-block mode only: run the `dataSourcePreview` recipe and add a
+   * "fetched" state, filled from the real endpoint, to the specimen. `values`
+   * override the field defaults for the request (the id it fetches by). It
+   * runs before the bridge starts listening and again on every `POST
+   * /reload`; the in-process `reload()` reuses the last result.
+   */
+  fetch?: { values: Record<string, unknown> };
 }
 
 /**
@@ -274,8 +333,15 @@ export function startBridge({
   port = 0,
   file = join(WORKING_DIR, "template.json"),
   harnessFile = HARNESS_FILE,
+  customBlock,
+  host,
+  env = process.env,
+  fetch: fetchOption,
 }: StartBridgeOptions = {}): Promise<BridgeHandle> {
-  const workingPath = isAbsolute(file) ? file : resolve(cwd, file);
+  const abs = (p: string) => (isAbsolute(p) ? p : resolve(cwd, p));
+  const customBlockPath = customBlock ? abs(customBlock) : null;
+  const hostPath = host ? abs(host) : null;
+  const workingPath = customBlockPath ?? abs(file);
 
   // Sync state. `baseline` is the editor's NORMALIZED view of the caller's last
   // content (captured by the page right after it applies an update), so the
@@ -305,6 +371,116 @@ export function startBridge({
     for (const res of clients) res.write(payload);
   }
 
+  /** Why the bridge won't run this definition's recipe, or null when it will. */
+  function recipeRefusal(def: CustomBlockWorkingFile): string | null {
+    if (!def.dataSourcePreview) return "This block has no dataSourcePreview.";
+    const errors = checkRecipe(def).filter((i) => i.severity === "error");
+    return errors.length > 0
+      ? `The dataSourcePreview recipe is refused: ${errors
+          .map((i) => `${i.ruleId}: ${i.message}`)
+          .join("; ")}`
+      : null;
+  }
+
+  // The fetched state's last outcome, null until the first run.
+  let fetched: (FetchedSpecimen & { unmapped?: string[] }) | null = null;
+
+  async function refreshFetched(): Promise<void> {
+    const data = readWorkingFile(customBlockPath as string);
+    if (data === null || !validateCustomBlockDefinition(data).valid) {
+      fetched = {
+        ok: false,
+        error: "The custom block definition is missing or invalid.",
+      };
+      return;
+    }
+    const def = data as CustomBlockWorkingFile;
+    const recipe = def.dataSourcePreview;
+    const refusal = recipeRefusal(def);
+    if (!recipe || refusal !== null) {
+      fetched = { ok: false, error: refusal ?? "" };
+      return;
+    }
+    const values = {
+      ...buildSpecimen(def)[0].fieldValues,
+      ...fetchOption?.values,
+    };
+    const result = await runRecipe(recipe, values, { env });
+    fetched = result.ok
+      ? {
+          ok: true,
+          fieldValues: { ...values, ...result.values },
+          unmapped: result.unmapped,
+        }
+      : { ok: false, error: result.error };
+  }
+
+  function lastFetch(): FetchSummary | null {
+    if (!fetched) return null;
+    return fetched.ok
+      ? { ok: true, unmapped: fetched.unmapped ?? [] }
+      : { ok: false, error: fetched.error };
+  }
+
+  type BlockView =
+    | {
+        ok: true;
+        def: CustomBlockWorkingFile;
+        payload: unknown;
+        template: TemplateContent;
+      }
+    | { ok: false; error: string };
+
+  // Read fresh on every request: the agent edits the file between reloads,
+  // and the page must never be handed a definition that failed validation.
+  function readBlockView(): BlockView {
+    const data = readWorkingFile(customBlockPath as string);
+    if (data === null || !validateCustomBlockDefinition(data).valid) {
+      return {
+        ok: false,
+        error:
+          "The custom block definition is missing or invalid. Run `templatical custom-block validate` on it.",
+      };
+    }
+    let hostContent: TemplateContent | undefined;
+    if (hostPath) {
+      const h = readWorkingFile(hostPath);
+      if (h === null || !validateTemplate(h).valid) {
+        return {
+          ok: false,
+          error:
+            "The --host template is missing or invalid. Run `templatical validate` on it.",
+        };
+      }
+      hostContent = h as TemplateContent;
+    }
+    const def = data as CustomBlockWorkingFile;
+    const { dataSourcePreview, ...definition } = def;
+    // The fetched state leads the specimen: it is the realistic one.
+    const base = hostContent ?? createDefaultTemplateContent();
+    const lead =
+      fetchOption && fetched ? fetchedSpecimenBlocks(def, fetched) : [];
+    return {
+      ok: true,
+      def,
+      payload: {
+        definition,
+        dataSource: dataSourcePreview
+          ? { label: dataSourcePreview.label }
+          : null,
+      },
+      template: buildSpecimenTemplate(def, {
+        ...base,
+        blocks: [...base.blocks, ...lead],
+      }),
+    };
+  }
+
+  function sendJson(res: ServerResponse, status: number, body: unknown): void {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  }
+
   function getEditorState(): {
     divergent: boolean;
     content: unknown;
@@ -317,24 +493,59 @@ export function startBridge({
     };
   }
 
-  function reload(options?: { consumeAnnotations?: boolean }): {
-    ok: boolean;
-    clients: number;
-    consumed: boolean;
-  } {
+  function reload(options?: { consumeAnnotations?: boolean }): ReloadResult {
+    // A failed read pushes nothing and leaves the page's state alone: the
+    // page still shows what it showed, so its divergence and notes still hold.
+    if (customBlockPath) {
+      const view = readBlockView();
+      if (!view.ok) {
+        return {
+          ok: false,
+          clients: clients.size,
+          consumed: false,
+          mode: "custom-block",
+          error: view.error,
+        };
+      }
+      state.baseline = null;
+      state.editorCurrent = null;
+      state.divergent = false;
+      const consumed = options?.consumeAnnotations === true;
+      if (consumed) state.annotations = [];
+      const payload = `event: custom-block\ndata: ${JSON.stringify({ block: view.payload, template: view.template })}\n\n`;
+      for (const res of clients) res.write(payload);
+      const fetch = fetchOption ? lastFetch() : null;
+      return {
+        ok: true,
+        clients: clients.size,
+        consumed,
+        mode: "custom-block",
+        ...(fetch ? { fetch } : {}),
+      };
+    }
+
     // The freshly-written file is the new baseline, so any pending user edit is
     // superseded. Notes stay: a plain reload is an ordinary edit, and clearing
     // them here would drop a queue the agent has not applied. consumeAnnotations
     // clears only after the file was actually read — clearing first would drop
     // the notes and push nothing when the file is missing.
     const content = readWorkingFile(workingPath);
+    if (content === null) {
+      return {
+        ok: false,
+        clients: clients.size,
+        consumed: false,
+        mode: "template",
+        error: `${workingPath} is missing or isn't valid JSON. Run \`templatical validate\` on it.`,
+      };
+    }
     state.baseline = null;
     state.editorCurrent = null;
     state.divergent = false;
-    const consumed = options?.consumeAnnotations === true && content !== null;
+    const consumed = options?.consumeAnnotations === true;
     if (consumed) state.annotations = [];
-    if (content !== null) broadcastTemplate(content);
-    return { ok: true, clients: clients.size, consumed };
+    broadcastTemplate(content);
+    return { ok: true, clients: clients.size, consumed, mode: "template" };
   }
 
   const server = createServer(async (req, res) => {
@@ -342,6 +553,42 @@ export function startBridge({
     const method = req.method ?? "GET";
 
     try {
+      // Only this listener's own loopback names are served: a DNS-rebound
+      // hostname would otherwise let any web page read the bridge as same-origin.
+      const addr = server.address();
+      const listening =
+        typeof addr === "object" && addr !== null ? addr.port : port;
+      const hostHeader = req.headers.host ?? "";
+      if (!loopbackNames(listening).some((n) => n === hostHeader)) {
+        res
+          .writeHead(403, { "content-type": "text/plain" })
+          .end("Forbidden host.");
+        return;
+      }
+
+      // Writes. The Host check above doesn't stop a page on another site from
+      // sending a simple cross-origin POST to localhost (text/plain, no
+      // preflight): its response is unreadable, but the write still lands, so
+      // a note it posts would reach the agent as the user's own. A browser
+      // attaches its Origin to every such request, so a foreign one is
+      // refused, and a POST must be JSON, which no simple request can be. PUT
+      // and DELETE need a preflight cross-site, which the bridge never grants.
+      if (method !== "GET" && method !== "HEAD") {
+        const origin = req.headers.origin;
+        if (
+          origin !== undefined &&
+          !loopbackNames(listening).some((n) => origin === `http://${n}`)
+        ) {
+          sendJson(res, 403, { error: "Forbidden origin." });
+          return;
+        }
+        const type = (req.headers["content-type"] ?? "").toLowerCase();
+        if (method === "POST" && !type.startsWith("application/json")) {
+          sendJson(res, 415, { error: "Send application/json." });
+          return;
+        }
+      }
+
       if (
         method === "GET" &&
         (pathname === "/" || pathname === "/index.html")
@@ -355,7 +602,62 @@ export function startBridge({
         return;
       }
 
+      if (method === "GET" && pathname === "/custom-block") {
+        if (!customBlockPath) {
+          res.writeHead(204).end();
+          return;
+        }
+        const view = readBlockView();
+        if (view.ok) sendJson(res, 200, view.payload);
+        else sendJson(res, 422, { error: view.error });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/data-source/fetch") {
+        if (!customBlockPath) {
+          res.writeHead(404, { "content-type": "text/plain" }).end("Not found");
+          return;
+        }
+        const view = readBlockView();
+        if (!view.ok) {
+          sendJson(res, 422, { error: view.error });
+          return;
+        }
+        // The recipe gate runs before the page's request is even read: a
+        // recipe `custom-block validate` rejects is never sent anywhere.
+        const recipe = view.def.dataSourcePreview;
+        const refusal = recipeRefusal(view.def);
+        if (!recipe || refusal !== null) {
+          sendJson(res, recipe ? 422 : 409, { error: refusal });
+          return;
+        }
+        // Only fieldValues is read: the recipe (URL, headers) never comes from the page.
+        const body = await readJsonBody(req);
+        const fieldValues =
+          body?.fieldValues &&
+          typeof body.fieldValues === "object" &&
+          !Array.isArray(body.fieldValues)
+            ? (body.fieldValues as Record<string, unknown>)
+            : {};
+        const result = await runRecipe(recipe, fieldValues, { env });
+        if (result.ok) {
+          sendJson(res, 200, {
+            values: result.values,
+            unmapped: result.unmapped,
+          });
+        } else {
+          sendJson(res, 502, { error: result.error });
+        }
+        return;
+      }
+
       if (method === "GET" && pathname === "/template") {
+        if (customBlockPath) {
+          const view = readBlockView();
+          if (view.ok) sendJson(res, 200, view.template);
+          else sendJson(res, 422, { error: view.error });
+          return;
+        }
         const content = readWorkingFile(workingPath);
         if (content === null) {
           res.writeHead(204).end(); // no working file yet — page inits empty
@@ -468,6 +770,7 @@ export function startBridge({
 
       if (method === "POST" && pathname === "/reload") {
         const body = await readJsonBody(req);
+        if (fetchOption && customBlockPath) await refreshFetched();
         const result = reload({
           consumeAnnotations: body?.consumeAnnotations === true,
         });
@@ -483,32 +786,43 @@ export function startBridge({
     }
   });
 
-  return new Promise((resolvePromise, rejectPromise) => {
-    // listen() reports failures (e.g. EADDRINUSE) as an 'error' event, not a
-    // throw — without this the error would be unhandled and crash the process.
-    const onListenError = (err: Error) => rejectPromise(err);
-    server.once("error", onListenError);
-    server.listen(port, "127.0.0.1", () => {
-      server.removeListener("error", onListenError);
-      const address = server.address();
-      const actualPort =
-        typeof address === "object" && address !== null ? address.port : port;
-      resolvePromise({
-        server,
-        port: actualPort,
-        url: `http://localhost:${actualPort}/`,
-        workingPath,
-        getEditorState,
-        reload,
-        close: () =>
-          new Promise<void>((r) => {
-            for (const c of clients) c.end();
-            clients.clear();
-            server.close(() => r());
-          }),
-      });
-    });
-  });
+  // The first fetch lands before the page can load, so it never shows a
+  // sheet without the fetched state.
+  const ready =
+    fetchOption && customBlockPath ? refreshFetched() : Promise.resolve();
+
+  return ready.then(
+    () =>
+      new Promise<BridgeHandle>((resolvePromise, rejectPromise) => {
+        // listen() reports failures (e.g. EADDRINUSE) as an 'error' event, not a
+        // throw — without this the error would be unhandled and crash the process.
+        const onListenError = (err: Error) => rejectPromise(err);
+        server.once("error", onListenError);
+        server.listen(port, "127.0.0.1", () => {
+          server.removeListener("error", onListenError);
+          const address = server.address();
+          const actualPort =
+            typeof address === "object" && address !== null
+              ? address.port
+              : port;
+          resolvePromise({
+            server,
+            port: actualPort,
+            url: `http://localhost:${actualPort}/`,
+            workingPath,
+            getEditorState,
+            reload,
+            lastFetch,
+            close: () =>
+              new Promise<void>((r) => {
+                for (const c of clients) c.end();
+                clients.clear();
+                server.close(() => r());
+              }),
+          });
+        });
+      }),
+  );
 }
 
 export interface PreferringHandle extends BridgeHandle {
