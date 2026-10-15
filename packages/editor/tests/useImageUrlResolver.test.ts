@@ -5,11 +5,17 @@ import { defineComponent, h, nextTick, ref, type Ref } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import {
   createImageUrlResolver,
+  getBackgroundLookupUrl,
+  hasMergeTagBackground,
+  readCachedBackgroundUrl,
+  readCachedImageUrl,
+  useResolvedBackgroundUrl,
   useResolvedImageSrc,
   type ResolveImageUrl,
 } from "../src/composables/useImageUrlResolver";
 import { RESOLVE_IMAGE_DEBOUNCE_MS } from "../src/constants/timeouts";
-import { IMAGE_URL_RESOLVER_KEY } from "../src/keys";
+import { IMAGE_URL_RESOLVER_KEY, MERGE_TAG_SYNTAX_KEY } from "../src/keys";
+import { SYNTAX_PRESETS, createBackgroundImage } from "@templatical/types";
 
 // ---------------------------------------------------------------------------
 // createImageUrlResolver — per-editor cache around the host callback
@@ -262,5 +268,110 @@ describe("useResolvedImageSrc", () => {
     settle("blob:late");
     await flushPromises();
     expect(result.display.value).toBe("blob:late");
+  });
+});
+
+describe("readCachedImageUrl", () => {
+  it("returns the src when there is no resolver or no src", () => {
+    expect(readCachedImageUrl(null, "logo.png")).toBe("logo.png");
+    expect(readCachedImageUrl(null, undefined)).toBeUndefined();
+  });
+
+  it("returns the cached result without starting a lookup", async () => {
+    const resolve = vi.fn((src: string) => `blob:${src}`);
+    const resolver = createImageUrlResolver(resolve);
+    expect(readCachedImageUrl(resolver, "logo.png")).toBe("logo.png");
+    expect(resolve).not.toHaveBeenCalled();
+
+    resolver.lookup("logo.png");
+    await flushPromises();
+    expect(readCachedImageUrl(resolver, "logo.png")).toBe("blob:logo.png");
+  });
+});
+
+describe("background image merge tags", () => {
+  const syntax = SYNTAX_PRESETS.liquid;
+  const mergeTag = createBackgroundImage("{{ hero_url }}");
+  const plain = createBackgroundImage("hero.jpg");
+
+  it("hasMergeTagBackground flags only a url holding a merge tag", () => {
+    expect(hasMergeTagBackground(mergeTag, syntax)).toBe(true);
+    expect(hasMergeTagBackground(plain, syntax)).toBe(false);
+    expect(hasMergeTagBackground(undefined, syntax)).toBe(false);
+  });
+
+  it("getBackgroundLookupUrl is the url, or undefined when there is nothing to resolve", () => {
+    expect(getBackgroundLookupUrl(plain, syntax)).toBe("hero.jpg");
+    expect(getBackgroundLookupUrl(mergeTag, syntax)).toBeUndefined();
+    expect(getBackgroundLookupUrl({ ...plain, url: "  " }, syntax)).toBeUndefined();
+    expect(getBackgroundLookupUrl(undefined, syntax)).toBeUndefined();
+  });
+
+  it("readCachedBackgroundUrl is null for a merge tag, the cached url otherwise", () => {
+    const resolve = vi.fn((src: string) => `blob:${src}`);
+    const resolver = createImageUrlResolver(resolve);
+
+    expect(readCachedBackgroundUrl(resolver, mergeTag, syntax)).toBeNull();
+    expect(readCachedBackgroundUrl(resolver, plain, syntax)).toBe("hero.jpg");
+    resolver.lookup("hero.jpg");
+    expect(readCachedBackgroundUrl(resolver, plain, syntax)).toBe("blob:hero.jpg");
+    expect(readCachedBackgroundUrl(resolver, undefined, syntax)).toBeUndefined();
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  describe("useResolvedBackgroundUrl", () => {
+    function mountBackgroundHarness(
+      bg: Ref<ReturnType<typeof createBackgroundImage> | undefined>,
+      resolver: ReturnType<typeof createImageUrlResolver> | null,
+    ) {
+      const result = {} as { display: Ref<string | null | undefined> };
+      mount(
+        defineComponent({
+          setup() {
+            result.display = useResolvedBackgroundUrl(() => bg.value);
+            return () => h("div");
+          },
+        }),
+        {
+          global: {
+            provide: {
+              [IMAGE_URL_RESOLVER_KEY as symbol]: resolver,
+              [MERGE_TAG_SYNTAX_KEY as symbol]: syntax,
+            },
+          },
+        },
+      );
+      return result;
+    }
+
+    it("resolves the url and swaps in the preview url", async () => {
+      const resolve = vi.fn(async (src: string) => `blob:${src}`);
+      const result = mountBackgroundHarness(
+        ref(plain),
+        createImageUrlResolver(resolve),
+      );
+
+      expect(result.display.value).toBe("hero.jpg");
+      await flushPromises();
+      expect(result.display.value).toBe("blob:hero.jpg");
+      expect(resolve).toHaveBeenCalledTimes(1);
+    });
+
+    it("is null and starts no lookup for a merge-tag url", async () => {
+      const resolve = vi.fn((src: string) => `blob:${src}`);
+      const result = mountBackgroundHarness(
+        ref(mergeTag),
+        createImageUrlResolver(resolve),
+      );
+      await flushPromises();
+
+      expect(result.display.value).toBeNull();
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it("is undefined without an image", () => {
+      const result = mountBackgroundHarness(ref(undefined), null);
+      expect(result.display.value).toBeUndefined();
+    });
   });
 });

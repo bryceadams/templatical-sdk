@@ -18,13 +18,15 @@ import {
   CONDITION_PREVIEW_KEY,
   EDITOR_KEY,
   FONTS_MANAGER_KEY,
+  IMAGE_URL_RESOLVER_KEY,
   MERGE_TAG_SAMPLE_MODE_KEY,
+  MERGE_TAG_SYNTAX_KEY,
   USE_MERGE_TAG_SAMPLES_KEY,
   requireInject,
 } from "../keys";
 import {
   resolveBlockComponent,
-  getBlockWrapperStyle,
+  getCachedBlockWrapperStyle,
   getDocumentStyle,
 } from "../utils/blockComponentResolver";
 import {
@@ -33,6 +35,7 @@ import {
   getEmailFrameWidth,
 } from "../utils/emailFrameWidth";
 import {
+  SYNTAX_PRESETS,
   resolveContentDirection,
   type Block,
   type TemplateSettings,
@@ -76,6 +79,8 @@ const blockRegistry = inject(BLOCK_REGISTRY_KEY);
 const editor = inject(EDITOR_KEY, null);
 const conditionPreview = inject(CONDITION_PREVIEW_KEY, null);
 const fontsManager = requireInject(FONTS_MANAGER_KEY, "BlockPreviewCanvas");
+const imageUrlResolver = inject(IMAGE_URL_RESOLVER_KEY, null);
+const mergeTagSyntax = inject(MERGE_TAG_SYNTAX_KEY, SYNTAX_PRESETS.liquid);
 
 /**
  * This canvas is only ever a preview — nothing here is editable — so it honours
@@ -205,6 +210,14 @@ const previewComponentMap: Record<string, Component> = {
 function getBlockComponent(block: Block): Component | null {
   return resolveBlockComponent(block, blockRegistry, previewComponentMap);
 }
+
+// This loop reads the resolver cache and never starts a lookup itself, so a
+// section's background image paints whatever the canvas has already resolved;
+// nested components (e.g. `ImageBlock`, a layout `WrapperBlock`) may resolve
+// their own images.
+function previewBlockStyle(block: Block): Record<string, string> {
+  return getCachedBlockWrapperStyle(block, imageUrlResolver, mergeTagSyntax);
+}
 </script>
 
 <template>
@@ -242,7 +255,7 @@ function getBlockComponent(block: Block): Component | null {
       <div
         v-for="block in visibleBlocks"
         :key="block.id"
-        :style="getBlockWrapperStyle(block)"
+        :style="previewBlockStyle(block)"
       >
         <component
           :is="getBlockComponent(block)"
