@@ -13,6 +13,7 @@ import {
 import { computed, defineAsyncComponent, inject, nextTick, ref } from "vue";
 import { useResolvedBackgroundUrl } from "../../composables/useImageUrlResolver";
 import {
+  backgroundImageHostClass,
   getBlockWrapperStyle,
   getSectionWrapperStyle,
 } from "../../utils/blockComponentResolver";
@@ -177,8 +178,8 @@ const wrapperBackgroundUrl = useResolvedBackgroundUrl(() =>
 );
 
 // Everything `getBlockWrapperStyle` computes lives on `.tpl-block-content`
-// (not `.tpl-block`): filter-based dark-mode preview targets
-// `.tpl-block-content` so the bg inverts together with its content, the
+// (not `.tpl-block`): the filter-based dark-mode preview inverts it as an
+// email surface, so the bg inverts together with its content, the
 // section corner radius has to round the element carrying that bg to match
 // the exported MJML, and `--tpl-doc-paragraph-spacing` has to sit on an
 // ancestor of the slotted `.tpl-text-content` for the paragraph rule to
@@ -345,20 +346,31 @@ function handleConditionToggle(): void {
         {{ blockCommentCount }}
       </button>
     </div>
-    <!-- Email content wrapper — target for the canvas dark-mode preview
-         filter. Block chrome (action bar, indicators, overlays) is a
-         sibling of this wrapper, so the filter never reaches them — no
-         counter-filter needed and no toggle flicker. -->
+    <!-- Email content — the section's wrapper frame when it has one, then
+         the block's box. Both are email surfaces: the canvas dark-mode
+         preview filters the outermost one. Block chrome (action bar,
+         indicators, overlays) is a sibling, so the filter never reaches it —
+         no counter-filter needed and no toggle flicker. -->
     <div
       v-if="sectionWrapperStyle"
-      class="tpl-section-wrapper"
+      class="tpl-section-wrapper tpl-email-surface"
       :style="sectionWrapperStyle"
+      :class="backgroundImageHostClass(sectionWrapperStyle)"
     >
-      <div class="tpl-block-content" :style="contentStyle">
+      <div
+        class="tpl-block-content tpl-email-surface"
+        :style="contentStyle"
+        :class="backgroundImageHostClass(contentStyle)"
+      >
         <slot />
       </div>
     </div>
-    <div v-else class="tpl-block-content" :style="contentStyle">
+    <div
+      v-else
+      class="tpl-block-content tpl-email-surface"
+      :style="contentStyle"
+      :class="backgroundImageHostClass(contentStyle)"
+    >
       <slot />
     </div>
   </div>
