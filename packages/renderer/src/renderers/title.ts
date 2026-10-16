@@ -1,6 +1,7 @@
 import type { TitleBlock } from "@templatical/types";
 import {
   HEADING_LEVEL_FONT_SIZE,
+  TITLE_LINE_HEIGHT,
   fillEmptyParagraphs,
 } from "@templatical/types";
 import type { RenderContext } from "../render-context";
@@ -57,7 +58,7 @@ export function renderTitle(block: TitleBlock, context: RenderContext): string {
   return `<mj-text
   font-size="${fontSize}px"${colorAttr}
   align="${align}"
-  line-height="1.3"
+  line-height="${TITLE_LINE_HEIGHT}"
   padding="${padding}"${bgColor}${fontFamilyAttr}${cssClassAttr}
 ><${tag} style="margin:0;font-size:inherit;color:inherit;line-height:inherit">${content}</${tag}></mj-text>`;
 }
