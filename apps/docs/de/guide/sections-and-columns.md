@@ -144,6 +144,25 @@ card.styles.backgroundColor = '#ffffff';
 
 Das `backgroundImage` einer Sektion legt ein Bild hinter ihre Spalten. Setzen Sie zusätzlich `styles.backgroundColor` als Fallback, solange das Bild lädt und in Clients, die keine Hintergrundbilder anzeigen. Im **Hintergrund**-Panel des Editors wählen Sie außerdem die Größe (Füllen, Einpassen oder Original), eine Position auf einem Neun-Punkte-Raster und ob sich das Bild wiederholt. Die Hinweise zu E-Mail-Clients finden Sie beim [Sektionsblock](/de/guide/blocks#section).
 
+### Hero
+
+Eine einspaltige Sektion mit Hintergrundbild kann als Hero dargestellt werden – als `mj-hero`, bei dem das Bild die Box füllt und der Inhalt darauf liegt. Setzen Sie dazu `hero`:
+
+```ts
+const banner = createSectionBlock({
+  columns: '1',
+  backgroundImage: {
+    ...createBackgroundImage('https://cdn.example.com/hero.jpg'),
+    naturalWidth: 1200,
+    naturalHeight: 800,
+  },
+  hero: { height: 'image', verticalAlign: 'middle' },
+});
+banner.styles.backgroundColor = '#1f2937';
+```
+
+`height: 'image'` macht die Box so hoch wie das Bild, das über ihre Desktop-Breite gezeichnet wird; dafür braucht es die Größe der Bilddatei in `backgroundImage.naturalWidth` / `naturalHeight`. Auf Smartphones bleibt diese Höhe, und das Bild wird seitlich beschnitten, um die schmalere Box zu füllen. Eine Auswahl aus der Mediathek, die die Größe kennt (`width` / `height` am Asset oder am `onRequestMedia`-Ergebnis), speichert sie mit der URL; andernfalls misst der Editor das Bild. Eine Zahl ist eine feste Höhe in px, Innenabstand eingeschlossen. Im Editor wechselt **Höhe** im Panel **Hintergrund** zwischen **Wie Inhalt** (kein Hero), **Wie Bild** und **Fest**, und **Position des Inhalts** platziert den Inhalt. Die Verknüpfung **Hero** in der Palette fügt einen Hero zum Ausfüllen ein: eine Sektion im Hero-Modus mit Titel, Absatz und Button auf dunkler Füllung. Die Hinweise zu E-Mail-Clients stehen beim [Sektionsblock](/de/guide/blocks#section).
+
 ### Äußerer Rahmen (Wrapper)
 
 Um eine Sektion in einem farbigen Band zu rahmen — z. B. eine weiße Karte auf blauem Hintergrund — setzen Sie `wrapper`. Es rendert ein `mj-wrapper` um die Sektion, mit eigenem Hintergrund, Padding und Eckenradius. Das Band ist so breit wie der E-Mail-Körper (`settings.width`), nicht wie das gesamte Fenster des Empfängers:

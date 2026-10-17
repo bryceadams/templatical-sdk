@@ -17,6 +17,7 @@ import {
 import type {
   Block,
   ParagraphBlock,
+  SectionBlock,
   TemplateContent,
   TemplateSettings,
 } from "@templatical/types";
@@ -29,7 +30,7 @@ import { convertMjmlTemplate } from "../converter";
  * inside a section column, a paragraph carrying a hard `<br>` line break, a
  * button at each width (fit to content, full and px), and per-corner radii and
  * borders on a button, an image, a section and a wrapper, and a section
- * background image and a wrapper background image.
+ * background image, a hero section and a wrapper background image.
  *
  * Excluded on purpose (§12): `countdown` (Cloud renders it server-side),
  * `custom` (needs a consumer registry), `html` (indistinguishable from
@@ -175,6 +176,28 @@ function buildFixtureTemplate(): TemplateContent {
             }),
           ]),
         ],
+      }),
+      createSectionBlock({
+        columns: "1",
+        children: [
+          col([createParagraphBlock({ content: "<p>Hero copy</p>" })]),
+        ],
+        // A box-sized image: the renderer writes background-width as the box
+        // width and the height at that width, so only this size reads back
+        // equal. Any size with the same ratio renders the same hero.
+        backgroundImage: {
+          url: "https://cdn.test/hero-banner.jpg",
+          size: "cover",
+          position: { x: "center", y: "top" },
+          repeat: false,
+          naturalWidth: 600,
+          naturalHeight: 400,
+        },
+        hero: { height: "image", verticalAlign: "middle" },
+        styles: {
+          padding: { top: 48, right: 24, bottom: 48, left: 24 },
+          backgroundColor: "#0f172a",
+        },
       }),
       createSectionBlock({
         columns: "1-2",
@@ -354,6 +377,7 @@ describe("round trip: renderToMjml -> convertMjmlTemplate", () => {
     expect(mjml).toContain('css-class="tpl-button-full"');
     expect(mjml).toContain('background-url="https://cdn.test/hero.jpg"');
     expect(mjml).toContain('background-url="https://cdn.test/band.png"');
+    expect(mjml).toContain('<mj-hero mode="fixed-height"');
     expect(report.summary.approximated).toBe(0);
     expect(report.summary.htmlFallback).toBe(0);
     expect(report.summary.skipped).toBe(0);
@@ -387,6 +411,48 @@ describe("round trip: renderToMjml -> convertMjmlTemplate", () => {
     const hidden = JSON.stringify(content).match(/"mobile":false/g);
 
     expect(hidden).toHaveLength(1);
+  });
+
+  it("reads a full-width image in a wrapper-framed hero back as full", async () => {
+    const original: TemplateContent = {
+      blocks: [
+        createSectionBlock({
+          columns: "1",
+          children: [
+            [
+              createImageBlock({
+                src: "https://cdn.test/inner.png",
+                alt: "Inner",
+                width: "full",
+              }),
+            ],
+          ],
+          backgroundImage: {
+            url: "https://cdn.test/hero-banner.jpg",
+            size: "cover",
+            position: { x: "center", y: "top" },
+            repeat: false,
+            naturalWidth: 560,
+            naturalHeight: 373,
+          },
+          hero: { height: "image", verticalAlign: "top" },
+          wrapper: { padding: { top: 0, right: 20, bottom: 0, left: 20 } },
+        }),
+      ],
+      settings: buildFixtureTemplate().settings,
+    };
+    const mjml = await renderToMjml(original);
+
+    // The renderer emits a full image at the hero's box, 560px inside the
+    // wrapper's padding; the import has to read that width back as "full",
+    // not freeze it at 560px.
+    expect(mjml).toMatch(/<mj-image[^>]*width="560px"/);
+
+    const { content, report } = convertMjmlTemplate(mjml);
+    const hero = content.blocks[0] as SectionBlock;
+    expect(hero.children[0][0]).toMatchObject({ type: "image", width: "full" });
+    expect(report.summary.approximated).toBe(0);
+    expect(report.summary.converted).toBe(report.summary.total);
   });
 
   it("preserves a hard <br> line break without duplicating or mis-nesting it", async () => {

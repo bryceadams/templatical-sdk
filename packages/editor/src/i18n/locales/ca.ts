@@ -62,6 +62,7 @@ const ca: typeof en = {
   // Sidebar - Block types
   blocks: {
     section: "Secció",
+    hero: "Hero",
     image: "Imatge",
     title: "Títol",
     paragraph: "Paràgraf",
@@ -172,6 +173,9 @@ const ca: typeof en = {
     wrapperLayoutConflict:
       "Aquest editor ja emmarca el correu. Un marc extra en aquesta secció no és compatible — la vista prèvia i l'exportació fallaran.",
     stackOnMobile: "Apila en mòbil",
+    heroNeedsOneColumn:
+      "El mode hero necessita una sola columna. Amb més, aquesta secció es mostra com una secció normal.",
+    heroAddImage: "Afegeix una imatge de fons",
   },
 
   // Text editor link dialog
@@ -484,6 +488,18 @@ const ca: typeof en = {
     backgroundPositionBottomCenter: "A baix al centre",
     backgroundPositionBottomRight: "A baix a la dreta",
     backgroundRepeat: "Repetir la imatge",
+    heroHeight: "Alçada",
+    heroHeightFit: "Ajusta al contingut",
+    heroHeightImage: "Com la imatge",
+    heroHeightFixed: "Fixa",
+    heroAlign: "Posició del contingut",
+    heroAlignTop: "A dalt",
+    heroAlignMiddle: "Al mig",
+    heroAlignBottom: "A baix",
+    heroMatchImageMergeTag:
+      "«Com la imatge» necessita una URL d'imatge directa: una etiqueta de fusió no té cap mida per llegir.",
+    heroSizeUnknown:
+      "La mida d'aquesta imatge encara no es coneix, així que la secció es mostra amb l'alçada del seu contingut.",
     display: "Visualització",
     showOnDesktop: "Mostra a l'escriptori",
     showOnMobile: "Mostra al mòbil",

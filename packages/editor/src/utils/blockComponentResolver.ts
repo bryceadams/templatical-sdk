@@ -1,7 +1,9 @@
 import type {
+  AppliedHero,
   BackgroundImage,
   Block,
   BorderValue,
+  HeroVerticalAlign,
   SyntaxPreset,
   TemplateSettings,
 } from "@templatical/types";
@@ -9,6 +11,7 @@ import {
   RICH_TEXT_SPACING,
   encodeCssUrl,
   resolveBackgroundImage,
+  resolveHero,
   toBorderDeclarations,
   toBorderRadiusCss,
 } from "@templatical/types";
@@ -93,6 +96,13 @@ export interface CanvasStyleOptions {
    * browser would request the literal token), so the fallback colour shows.
    */
   backgroundImageUrl?: string | null;
+  /**
+   * The desktop width of a "match image" hero's box (`matchImageBoxWidth`).
+   * Its height follows that width on every viewport, as the email's fixed
+   * height does; without it the box takes the image's shape at its current
+   * width, the same height at the desktop width.
+   */
+  heroBoxWidth?: number;
 }
 
 /**
@@ -145,6 +155,45 @@ export function backgroundImageHostClass(
     : undefined;
 }
 
+const HERO_JUSTIFY: Record<HeroVerticalAlign, string> = {
+  top: "flex-start",
+  middle: "center",
+  bottom: "flex-end",
+};
+
+/**
+ * Canvas declarations for a hero's box, the way the renderer sizes its
+ * `mj-hero`: a fixed height, padding included — for `height: "image"` the
+ * image's own height across the desktop `boxWidth` (`heroGeometry`). It grows
+ * with content taller than that, and places the content by `verticalAlign`.
+ */
+export function getHeroStyle(
+  hero: AppliedHero,
+  boxWidth?: number,
+): Record<string, string> {
+  const size: Record<string, string> =
+    typeof hero.height === "number"
+      ? { minHeight: `${hero.height}px` }
+      : boxWidth !== undefined && hero.aspectRatio !== null
+        ? { minHeight: `${matchImageHeight(boxWidth, hero.aspectRatio)}px` }
+        : { aspectRatio: `1 / ${hero.aspectRatio ?? 1}` };
+  return {
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: HERO_JUSTIFY[hero.verticalAlign],
+    boxSizing: "border-box",
+    ...size,
+  };
+}
+
+/** The renderer's `heroGeometry` height for a "match image" hero. */
+function matchImageHeight(boxWidth: number, aspectRatio: number): number {
+  return Math.max(
+    1,
+    Math.round(Math.max(1, Math.round(boxWidth)) * aspectRatio),
+  );
+}
+
 /**
  * Computes inline styles for a block wrapper from its styles config.
  */
@@ -181,19 +230,33 @@ export function getBlockWrapperStyle(
   // Same for the section border, which exports as `border` (or per-side
   // `border-<side>`) on the `mj-section`. The background image follows the
   // same rule, painted with the resolved display URL when the caller has one.
+  // A hero box follows mj-hero instead (`getHeroStyle`).
   if (block.type === "section") {
     const radius = toBorderRadiusCss(block.borderRadius);
     if (radius !== null) {
       style.borderRadius = radius;
     }
-    Object.assign(style, getBorderStyle(block.border));
-    Object.assign(
-      style,
-      getBackgroundImageStyle(
-        block.backgroundImage,
-        options.backgroundImageUrl,
-      ),
-    );
+    const hero = resolveHero(block);
+    if (hero?.applied && block.backgroundImage) {
+      // mj-hero draws no border and always paints its image cover, unrepeated.
+      Object.assign(style, getHeroStyle(hero, options.heroBoxWidth));
+      Object.assign(
+        style,
+        getBackgroundImageStyle(
+          { ...block.backgroundImage, size: "cover", repeat: false },
+          options.backgroundImageUrl,
+        ),
+      );
+    } else {
+      Object.assign(style, getBorderStyle(block.border));
+      Object.assign(
+        style,
+        getBackgroundImageStyle(
+          block.backgroundImage,
+          options.backgroundImageUrl,
+        ),
+      );
+    }
   }
   return style;
 }
@@ -209,6 +272,7 @@ export function getCachedBlockWrapperStyle(
   block: Block,
   resolver: ImageUrlResolver | null,
   syntax: SyntaxPreset,
+  heroBoxWidth?: number,
 ): Record<string, string> {
   if (block.type !== "section") return getBlockWrapperStyle(block);
   return getBlockWrapperStyle(block, {
@@ -217,6 +281,7 @@ export function getCachedBlockWrapperStyle(
       block.backgroundImage,
       syntax,
     ),
+    heroBoxWidth,
   });
 }
 

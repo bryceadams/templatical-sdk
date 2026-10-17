@@ -26,6 +26,7 @@ import {
 } from "@templatical/types";
 import type { UseBlockRegistryReturn } from "../src/composables/useBlockRegistry";
 import { markRaw, type Component } from "vue";
+import { renderToMjml } from "@templatical/renderer";
 
 const FakeTitle = markRaw({ name: "FakeTitle" }) as unknown as Component;
 const FakeImage = markRaw({ name: "FakeImage" }) as unknown as Component;
@@ -214,6 +215,124 @@ describe("getBlockWrapperStyle", () => {
       },
     });
     expect(getBlockWrapperStyle(block)).toEqual({});
+  });
+});
+
+describe("getBlockWrapperStyle for a hero", () => {
+  const image = {
+    ...createBackgroundImage("https://cdn.test/hero.jpg"),
+    size: "contain" as const,
+    repeat: true,
+    naturalWidth: 1200,
+    naturalHeight: 800,
+  };
+  const border = uniformBorder({ width: 2, style: "solid", color: "#ff0000" });
+  const drawsBorder = (style: Record<string, string>) =>
+    Object.keys(style).some((key) => /^border(?!Radius)/.test(key));
+
+  it("draws a matching hero at the renderer's fixed height for its desktop box, on every viewport", () => {
+    const section = createSectionBlock({
+      backgroundImage: image,
+      hero: { height: "image", verticalAlign: "middle" },
+    });
+    const style = getBlockWrapperStyle(section, { heroBoxWidth: 600 });
+    expect(style).toMatchObject({ minHeight: "400px" });
+    expect(style).not.toHaveProperty("aspectRatio");
+    expect(getBlockWrapperStyle(section, { heroBoxWidth: 560 }).minHeight).toBe(
+      "373px",
+    );
+  });
+
+  it.each([
+    [600, 1200, 800],
+    [560, 1200, 800],
+    [333, 1000, 333],
+    [600, 1920, 1081],
+  ])(
+    "matches the renderer's Match image height in a %ipx body (%ix%i image)",
+    async (width, naturalWidth, naturalHeight) => {
+      const section = createSectionBlock({
+        backgroundImage: { ...image, naturalWidth, naturalHeight },
+        hero: { height: "image", verticalAlign: "middle" },
+        styles: {
+          padding: { top: 0, right: 0, bottom: 0, left: 0 },
+          backgroundColor: "",
+        },
+      });
+      const content = createDefaultTemplateContent();
+      content.settings = { ...content.settings, width };
+      content.blocks = [section];
+      const mjml = await renderToMjml(content);
+      const height = /<mj-hero[^>]* height="(\d+)px"/.exec(mjml);
+      expect(height).not.toBeNull();
+      expect(
+        getBlockWrapperStyle(section, { heroBoxWidth: width }).minHeight,
+      ).toBe(`${height![1]}px`);
+    },
+  );
+
+  it("draws a matching hero at the image's shape where its box is unknown, cover and unrepeated, with no border", () => {
+    const style = getBlockWrapperStyle(
+      createSectionBlock({
+        backgroundImage: image,
+        hero: { height: "image", verticalAlign: "bottom" },
+        border,
+        borderRadius: 12,
+      }),
+    );
+    expect(style).toMatchObject({
+      display: "flex",
+      flexDirection: "column",
+      justifyContent: "flex-end",
+      boxSizing: "border-box",
+      aspectRatio: `1 / ${800 / 1200}`,
+      backgroundSize: "cover",
+      backgroundRepeat: "no-repeat",
+      borderRadius: "12px",
+    });
+    expect(style).not.toHaveProperty("minHeight");
+    expect(drawsBorder(style)).toBe(false);
+  });
+
+  it("draws a fixed hero at least as tall as its height", () => {
+    const style = getBlockWrapperStyle(
+      createSectionBlock({
+        backgroundImage: createBackgroundImage("https://cdn.test/hero.jpg"),
+        hero: { height: 320, verticalAlign: "middle" },
+      }),
+    );
+    expect(style).toMatchObject({
+      minHeight: "320px",
+      justifyContent: "center",
+    });
+    expect(style).not.toHaveProperty("aspectRatio");
+  });
+
+  it("draws a hero that doesn't apply as a regular section", () => {
+    const style = getBlockWrapperStyle(
+      createSectionBlock({
+        columns: "2",
+        children: [[], []],
+        backgroundImage: image,
+        hero: { height: "image", verticalAlign: "middle" },
+        border,
+      }),
+    );
+    expect(style).not.toHaveProperty("display");
+    expect(style.backgroundSize).toBe("contain");
+    expect(drawsBorder(style)).toBe(true);
+  });
+
+  it("lays out a merge-tag hero without painting its image", () => {
+    const style = getBlockWrapperStyle(
+      createSectionBlock({
+        backgroundImage: createBackgroundImage("{{ hero_url }}"),
+        hero: { height: 300, verticalAlign: "top" },
+      }),
+      { backgroundImageUrl: null },
+    );
+    expect(style).toMatchObject({ minHeight: "300px" });
+    expect(style).not.toHaveProperty("backgroundImage");
   });
 });
 
@@ -587,5 +706,25 @@ describe("background images and merge tags", () => {
         getBlockWrapperStyle(title),
       );
     });
+  });
+});
+
+describe("getCachedBlockWrapperStyle for a hero", () => {
+  it("draws a matching hero at its desktop box's height", () => {
+    const section = createSectionBlock({
+      backgroundImage: {
+        ...createBackgroundImage("https://cdn.test/hero.jpg"),
+        naturalWidth: 1200,
+        naturalHeight: 800,
+      },
+      hero: { height: "image", verticalAlign: "middle" },
+    });
+    const style = getCachedBlockWrapperStyle(
+      section,
+      null,
+      SYNTAX_PRESETS.liquid,
+      560,
+    );
+    expect(style.minHeight).toBe("373px");
   });
 });

@@ -250,6 +250,7 @@ interface SectionBlock extends BaseBlock {
   columns: ColumnLayout;
   border?: BorderValue;     // ohne Angabe: kein Rahmen
   backgroundImage?: BackgroundImage; // ohne Angabe: kein Bild; styles.backgroundColor dient als Fallback
+  hero?: SectionHero;       // ohne Angabe: normale Sektion; gilt mit einer Spalte und einem Bild
   children: Block[][];      // Array von Spalten, die jeweils Blöcke enthalten
   stackOnMobile?: boolean;  // fehlt/true: Spalten stapeln auf Mobilgeräten (MJML-Standard).
                             // false: als <mj-group> gerendert, bleiben nebeneinander.
@@ -265,6 +266,13 @@ interface BackgroundImage {
     y: 'top' | 'center' | 'bottom';
   };
   repeat: boolean; // false: einmal gezeichnet
+  naturalWidth?: number;   // eigene Größe der Bilddatei in px; die Höhe 'image' eines Heros übernimmt diese Form
+  naturalHeight?: number;
+}
+
+interface SectionHero {
+  height: 'image' | number; // 'image': so hoch wie das Bild über die Desktop-Box; eine Zahl: feste Höhe in px, Innenabstand eingeschlossen
+  verticalAlign: 'top' | 'middle' | 'bottom';
 }
 ```
 
@@ -600,6 +608,7 @@ import {
   createImageBlock,
   createButtonBlock,
   createSectionBlock,
+  createBackgroundImage,
   createDividerBlock,
   createVideoBlock,
   createSpacerBlock,
@@ -628,6 +637,11 @@ const heading = createTitleBlock({
 
 // Beliebigen Block per Typ-String erstellen
 const block = createBlock('button');
+
+// Ein Hintergrundbild einer Sektion aus seiner URL: zentriert, cover, nicht gekachelt
+const section = createSectionBlock({
+  backgroundImage: createBackgroundImage('https://cdn.example.com/hero.jpg'),
+});
 
 // Deep Clone mit neuen IDs, auch für verschachtelte Zeilen, Einträge und Icons
 const copy = cloneBlock(existingBlock);

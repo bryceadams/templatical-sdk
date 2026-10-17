@@ -1,17 +1,21 @@
 // @vitest-environment happy-dom
 import "./dom-stubs";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { computed, nextTick } from "vue";
 import { flushPromises } from "@vue/test-utils";
 import { createBackgroundImage } from "@templatical/types";
 import type { BackgroundImage, MediaResult } from "@templatical/types";
 import BackgroundImageControl from "../src/components/toolbar/BackgroundImageControl.vue";
+import { createImageUrlResolver } from "../src/composables/useImageUrlResolver";
+import { RESOLVE_IMAGE_DEBOUNCE_MS } from "../src/constants/timeouts";
 import {
   CAN_DROP_MEDIA_KEY,
+  IMAGE_URL_RESOLVER_KEY,
   ON_REQUEST_MEDIA_KEY,
   TRANSLATIONS_KEY,
 } from "../src/keys";
 import en from "../src/i18n/locales/en";
+import { FAKE_IMAGE_LOAD_MS, stubImages } from "./helpers/fakeImage";
 import { mountEditor } from "./helpers/mount";
 
 const HERO = "https://cdn.test/hero.jpg";
@@ -416,5 +420,229 @@ describe("BackgroundImageControl", () => {
       );
       expect(wrapper.emitted("update:modelValue")).toBeUndefined();
     });
+  });
+});
+
+describe("BackgroundImageControl image size", () => {
+  const OTHER = "https://cdn.test/other.jpg";
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function mountMeasuring(
+    modelValue: BackgroundImage | undefined,
+    provides: Record<symbol, unknown> = {},
+  ) {
+    return mountEditor(BackgroundImageControl, {
+      props: { modelValue, testidPrefix: "t", measure: true },
+      provides: { [TRANSLATIONS_KEY]: en, ...provides },
+    });
+  }
+
+  /** Type a url and feed the emitted image back, as the parent does. */
+  async function typeUrl(wrapper: ReturnType<typeof mountMeasuring>, url: string) {
+    await wrapper.find('[data-testid="t-bg-url"] input').setValue(url);
+    await wrapper.setProps({ modelValue: lastEmitted(wrapper) });
+  }
+
+  it("drops the old image's size when the url changes", async () => {
+    const wrapper = mountIt({
+      ...createBackgroundImage(HERO),
+      naturalWidth: 1200,
+      naturalHeight: 800,
+    });
+    await wrapper.find('[data-testid="t-bg-url"] input').setValue(OTHER);
+    expect(lastEmitted(wrapper)).toEqual(createBackgroundImage(OTHER));
+  });
+
+  it("measures the url the author sets, once typing settles", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({ [HERO]: { width: 1200, height: 800 } });
+    const wrapper = mountMeasuring(undefined);
+    await typeUrl(wrapper, HERO);
+    expect(images.requested).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(images.requested).toEqual([HERO]);
+    expect(lastEmitted(wrapper)).toEqual({
+      ...createBackgroundImage(HERO),
+      naturalWidth: 1200,
+      naturalHeight: 800,
+    });
+  });
+
+  it("measures the display url when a resolver is configured", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({ [`blob:${HERO}`]: { width: 600, height: 300 } });
+    const wrapper = mountMeasuring(undefined, {
+      [IMAGE_URL_RESOLVER_KEY]: createImageUrlResolver((src) => `blob:${src}`),
+    });
+    await typeUrl(wrapper, HERO);
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(images.requested).toEqual([`blob:${HERO}`]);
+    expect(lastEmitted(wrapper)).toMatchObject({
+      naturalWidth: 600,
+      naturalHeight: 300,
+    });
+  });
+
+  it("drops a size measured for a url the author has since replaced", async () => {
+    vi.useFakeTimers();
+    stubImages({ [HERO]: { width: 1200, height: 800 } });
+    const wrapper = mountMeasuring(undefined);
+    await typeUrl(wrapper, HERO);
+    await vi.advanceTimersByTimeAsync(RESOLVE_IMAGE_DEBOUNCE_MS);
+    // HERO is loading; the image changes before it finishes.
+    await wrapper.setProps({ modelValue: createBackgroundImage(OTHER) });
+    await vi.advanceTimersByTimeAsync(FAKE_IMAGE_LOAD_MS);
+    const emitted = wrapper.emitted("update:modelValue")!;
+    expect(emitted.some(([value]) => (value as BackgroundImage).naturalWidth)).toBe(
+      false,
+    );
+  });
+
+  it("stores a browsed image's size with its url, and measures nothing", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({});
+    const onRequestMedia = vi.fn(async () => ({
+      url: HERO,
+      width: 1200,
+      height: 800,
+    }));
+    const wrapper = mountMeasuring(undefined, {
+      [ON_REQUEST_MEDIA_KEY]: onRequestMedia,
+    });
+    await wrapper.get('[data-testid="t-bg-browse"]').trigger("click");
+    await flushPromises();
+    await wrapper.setProps({ modelValue: lastEmitted(wrapper) });
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(wrapper.emitted("update:modelValue")).toEqual([
+      [{ ...createBackgroundImage(HERO), naturalWidth: 1200, naturalHeight: 800 }],
+    ]);
+    expect(images.requested).toEqual([]);
+  });
+
+  it("measures a browsed image whose size the media library doesn't give", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({ [HERO]: { width: 1200, height: 800 } });
+    const onRequestMedia = vi.fn(async () => ({ url: HERO }));
+    const wrapper = mountMeasuring(undefined, {
+      [ON_REQUEST_MEDIA_KEY]: onRequestMedia,
+    });
+    await wrapper.get('[data-testid="t-bg-browse"]').trigger("click");
+    await flushPromises();
+    await wrapper.setProps({ modelValue: lastEmitted(wrapper) });
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(images.requested).toEqual([HERO]);
+    expect(wrapper.emitted("update:modelValue")).toEqual([
+      [createBackgroundImage(HERO)],
+      [{ ...createBackgroundImage(HERO), naturalWidth: 1200, naturalHeight: 800 }],
+    ]);
+  });
+
+  it("stores a dropped image's size with its url", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({});
+    const onRequestMedia = vi.fn(async () => ({
+      url: HERO,
+      width: 600,
+      height: 300,
+    }));
+    const wrapper = mountMeasuring(undefined, {
+      [ON_REQUEST_MEDIA_KEY]: onRequestMedia,
+    });
+    await flushPromises();
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    const file = new File(["data"], "hero.png", { type: "image/png" });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { files: [file], items: [{ type: file.type }] },
+    });
+    wrapper.get('[data-testid="t-bg-url"]').element.dispatchEvent(event);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(wrapper.emitted("update:modelValue")).toEqual([
+      [{ ...createBackgroundImage(HERO), naturalWidth: 600, naturalHeight: 300 }],
+    ]);
+    expect(images.requested).toEqual([]);
+  });
+
+  it("cancels a pending measurement when the url is cleared", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({ [HERO]: { width: 1200, height: 800 } });
+    const wrapper = mountMeasuring(undefined);
+    await typeUrl(wrapper, HERO);
+    await typeUrl(wrapper, "");
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(images.requested).toEqual([]);
+    expect(wrapper.emitted("update:modelValue")).toEqual([
+      [createBackgroundImage(HERO)],
+      [undefined],
+    ]);
+  });
+
+  it("keeps a picked size off an image that doesn't track it", async () => {
+    const onRequestMedia = vi.fn(async () => ({
+      url: HERO,
+      width: 1200,
+      height: 800,
+    }));
+    const wrapper = mountIt(undefined, {
+      [ON_REQUEST_MEDIA_KEY]: onRequestMedia,
+    });
+    await wrapper.get('[data-testid="t-bg-browse"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.emitted("update:modelValue")).toEqual([
+      [createBackgroundImage(HERO)],
+    ]);
+  });
+
+  it("does not measure without `measure`", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({ [HERO]: { width: 1200, height: 800 } });
+    const wrapper = mountIt(undefined);
+    await wrapper.find('[data-testid="t-bg-url"] input').setValue(HERO);
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(images.requested).toEqual([]);
+  });
+
+  it("does not measure a merge-tag url", async () => {
+    vi.useFakeTimers();
+    const images = stubImages({});
+    const wrapper = mountMeasuring(undefined);
+    await typeUrl(wrapper, "{{ hero_url }}");
+    await vi.advanceTimersByTimeAsync(
+      RESOLVE_IMAGE_DEBOUNCE_MS + FAKE_IMAGE_LOAD_MS,
+    );
+    expect(images.requested).toEqual([]);
+  });
+
+  it("hides size and repeat in hero mode, keeping the position", () => {
+    const wrapper = mountEditor(BackgroundImageControl, {
+      props: {
+        modelValue: createBackgroundImage(HERO),
+        testidPrefix: "t",
+        heroMode: true,
+      },
+      provides: { [TRANSLATIONS_KEY]: en },
+    });
+    expect(wrapper.find('[data-testid="t-bg-size"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="t-bg-repeat"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="t-bg-position"]').exists()).toBe(true);
   });
 });

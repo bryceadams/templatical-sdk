@@ -180,13 +180,17 @@ describe("buildTopLevel", () => {
     );
   });
 
-  it("walks hero children and prepends background-url as an image", () => {
+  it("walks hero children and maps background-url onto a hero background", () => {
     const { blocks, entries } = build({
       type: "standard-hero",
       data: {},
       attributes: {
         "background-color": "#000000",
         "background-url": "https://cdn.test/hero.png",
+        mode: "fluid-height",
+        "background-width": "1200px",
+        "background-height": "800px",
+        "vertical-align": "middle",
       },
       children: [
         {
@@ -199,14 +203,79 @@ describe("buildTopLevel", () => {
     });
     const s = blocks[0] as SectionBlock;
     expect(s.columns).toBe("1");
-    expect(s.children[0][0].type).toBe("image");
-    expect(s.children[0][1].type).toBe("title");
+    expect(s.children[0][0].type).toBe("title");
+    expect(s.children[0].some((b) => b.type === "image")).toBe(false);
     expect(s.styles.backgroundColor).toBe("#000000");
-    expect(
-      entries.some(
-        (e) => e.sourceTag === "standard-hero" && e.status === "approximated",
-      ),
-    ).toBe(true);
+    expect(s.hero).toEqual({ height: "image", verticalAlign: "middle" });
+    expect(s.backgroundImage).toMatchObject({
+      url: "https://cdn.test/hero.png",
+      size: "cover",
+      position: { x: "center", y: "center" },
+      repeat: false,
+      naturalWidth: 1200,
+      naturalHeight: 800,
+    });
+    expect(entries[0]).toEqual({
+      sourceTag: "standard-hero",
+      templaticalBlockType: "section",
+      status: "converted",
+    });
+  });
+
+  it("maps a fixed-height hero to a fixed height", () => {
+    const { blocks } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: {
+        "background-url": "https://cdn.test/hero.png",
+        mode: "fixed-height",
+        height: "320px",
+      },
+      children: [],
+    });
+    expect((blocks[0] as SectionBlock).hero).toEqual({
+      height: 320,
+      verticalAlign: "top",
+    });
+  });
+
+  it("gives a hero with no background-color mj-hero's white", () => {
+    const { blocks } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: {},
+      children: [],
+    });
+    expect((blocks[0] as SectionBlock).styles.backgroundColor).toBe("#ffffff");
+  });
+
+  it("leaves a hero with an explicit transparent background-color unfilled", () => {
+    const { blocks } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: { "background-color": "transparent" },
+      children: [],
+    });
+    expect((blocks[0] as SectionBlock).styles.backgroundColor).toBeUndefined();
+  });
+
+  it("takes the page content colour for a hero with no background-color", () => {
+    const p: EasyEmailProNode = {
+      type: "page",
+      data: {},
+      attributes: { "content-background-color": "#263D29" },
+      children: [],
+    };
+    const { blocks } = build(
+      {
+        type: "standard-hero",
+        data: {},
+        attributes: {},
+        children: [],
+      },
+      p,
+    );
+    expect((blocks[0] as SectionBlock).styles.backgroundColor).toBe("#263D29");
   });
 
   it("flattens a nested group inside a column", () => {
@@ -540,7 +609,7 @@ describe("background images", () => {
     ]);
   });
 
-  it("keeps a hero's background-url as its leading image, with no backgroundImage", () => {
+  it("reads a hero with no mode or height as a regular section with a background image", () => {
     const { blocks } = build({
       type: "standard-hero",
       data: {},
@@ -548,7 +617,83 @@ describe("background images", () => {
       children: [],
     });
     const hero = blocks[0] as SectionBlock;
-    expect(hero.children[0][0].type).toBe("image");
-    expect("backgroundImage" in hero).toBe(false);
+    expect("hero" in hero).toBe(false);
+    expect(hero.backgroundImage).toMatchObject({
+      url: "https://cdn.test/hero.png",
+      size: "cover",
+      repeat: false,
+    });
+    expect(hero.children[0]).toEqual([]);
+  });
+
+  it("notes a fluid hero without an image size", () => {
+    const { entries } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: {
+        "background-url": "https://cdn.test/hero.png",
+        mode: "fluid-height",
+      },
+      children: [],
+    });
+    expect(entries[0]).toMatchObject({
+      status: "approximated",
+      note: "Hero fluid-height has no background-width / background-height, so its image size is unknown; it renders as a regular section until it has a size or a fixed height.",
+    });
+  });
+
+  it("notes an unknown mode and vertical-align", () => {
+    const { blocks, entries } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: {
+        "background-url": "https://cdn.test/hero.png",
+        mode: "sideways",
+        height: "300px",
+        "vertical-align": "baseline",
+      },
+      children: [],
+    });
+    expect((blocks[0] as SectionBlock).hero).toEqual({
+      height: 300,
+      verticalAlign: "top",
+    });
+    expect(entries[0].note).toBe(
+      'Hero vertical-align "baseline" has no Templatical equivalent; imported as "top". Hero mode "sideways" has no Templatical equivalent; imported as "fixed-height".',
+    );
+  });
+
+  it("notes a hero with a height but no background-url", () => {
+    const { blocks, entries } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: { mode: "fixed-height", height: "300px" },
+      children: [],
+    });
+    expect((blocks[0] as SectionBlock).hero).toEqual({
+      height: 300,
+      verticalAlign: "top",
+    });
+    expect(entries[0].note).toBe(
+      "Hero has no background-url, so it renders as a regular section until it has a background image.",
+    );
+  });
+
+  it("drops inner-padding and inner-background-color with a note", () => {
+    const { entries } = build({
+      type: "standard-hero",
+      data: {},
+      attributes: {
+        "background-url": "https://cdn.test/hero.png",
+        mode: "fixed-height",
+        height: "300px",
+        "inner-padding": "10px",
+        "inner-background-color": "#ffffff",
+      },
+      children: [],
+    });
+    expect(entries[0].note).toBe(
+      'Hero inner-padding "10px" has no Templatical equivalent; dropped. Hero inner-background-color "#ffffff" has no Templatical equivalent; dropped.',
+    );
   });
 });

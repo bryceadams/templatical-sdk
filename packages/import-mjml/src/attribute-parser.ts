@@ -5,6 +5,7 @@ import type {
   BackgroundSize,
   BorderRadiusValue,
   BorderSideValue,
+  SectionHero,
   SpacingValue,
 } from "@templatical/types";
 
@@ -509,4 +510,134 @@ export function readMjmlBackgroundImage(
   }
 
   return { image: { url, size, position: { x, y }, repeat }, notes };
+}
+
+/** A section hero read from an `mj-hero`, with a note for each value it couldn't carry. */
+export interface ReadHero {
+  /** `null` for a content-height hero, which a regular section paints exactly. */
+  hero: SectionHero | null;
+  image: BackgroundImage | null;
+  notes: string[];
+}
+
+const HERO_ALIGNS = ["top", "middle", "bottom"] as const;
+
+const HERO_DROPPED_ATTRIBUTES = [
+  "inner-padding",
+  "inner-padding-top",
+  "inner-padding-right",
+  "inner-padding-bottom",
+  "inner-padding-left",
+  "inner-background-color",
+];
+
+/**
+ * An `mj-hero`'s mode, height and background, taking MJML's defaults for what
+ * it leaves out (`fixed-height`, `0px`, `center center`, `vertical-align:
+ * top`). mj-hero always paints its image `cover` and unrepeated and has no
+ * position longhands, so those are fixed rather than read.
+ * `background-width` / `background-height` are stored as the image's
+ * `naturalWidth` / `naturalHeight`, though they are often the hero box's size
+ * (Templatical's renderer writes them so) rather than the file's: only their
+ * ratio is used. A `fixed-height` hero without a positive `height` is as
+ * tall as its content — exactly what a regular section with the same
+ * background paints — so it comes back without `hero`.
+ *
+ * Templatical's renderer writes "match image" as `fixed-height`: the image
+ * drawn across the hero box (`background-width` = `boxWidth`) and the box at
+ * the image's own height, or at the hero's `verticalPadding` where the image
+ * is shorter. That exact shape comes back as `height: "image"`, which
+ * re-renders identically.
+ */
+export function readMjmlHero(
+  read: (name: string) => string | undefined,
+  label: string,
+  boxWidth: number,
+  verticalPadding: number,
+): ReadHero {
+  const notes: string[] = [];
+
+  const background = readMjmlBackgroundImage(
+    (name) => {
+      if (name === "background-size") return "cover";
+      if (name === "background-repeat") return "no-repeat";
+      if (name === "background-position") {
+        return read(name) ?? "center center";
+      }
+      if (
+        name === "background-position-x" ||
+        name === "background-position-y"
+      ) {
+        return undefined;
+      }
+      return read(name);
+    },
+    label,
+    boxWidth,
+  );
+  if (background) notes.push(...background.notes);
+
+  const width = parseDefinitePx(read("background-width"));
+  const height = parseDefinitePx(read("background-height"));
+  const sized = width !== null && height !== null && width > 0 && height > 0;
+  const image = background
+    ? {
+        ...background.image,
+        ...(sized ? { naturalWidth: width, naturalHeight: height } : {}),
+      }
+    : null;
+
+  const rawAlign = read("vertical-align")?.trim();
+  const verticalAlign =
+    HERO_ALIGNS.find((align) => align === rawAlign?.toLowerCase()) ?? "top";
+  if (rawAlign && verticalAlign !== rawAlign.toLowerCase()) {
+    notes.push(
+      `${label} vertical-align "${rawAlign}" has no Templatical equivalent; imported as "top".`,
+    );
+  }
+
+  const rawMode = read("mode")?.trim();
+  const mode = rawMode ? rawMode.toLowerCase() : "fixed-height";
+  let hero: SectionHero | null = null;
+  if (mode === "fluid-height") {
+    hero = { height: "image", verticalAlign };
+    if (!sized) {
+      notes.push(
+        `${label} fluid-height has no background-width / background-height, so its image size is unknown; it renders as a regular section until it has a size or a fixed height.`,
+      );
+    }
+  } else {
+    if (mode !== "fixed-height") {
+      notes.push(
+        `${label} mode "${rawMode}" has no Templatical equivalent; imported as "fixed-height".`,
+      );
+    }
+    const fixed = parseDefinitePx(read("height"));
+    if (fixed !== null && fixed > 0) {
+      const matchesImage =
+        sized &&
+        width === boxWidth &&
+        fixed === Math.max(height, verticalPadding);
+      hero = {
+        height: matchesImage ? "image" : Math.round(fixed),
+        verticalAlign,
+      };
+    }
+  }
+
+  if (hero && !image) {
+    notes.push(
+      `${label} has no background-url, so it renders as a regular section until it has a background image.`,
+    );
+  }
+
+  for (const name of HERO_DROPPED_ATTRIBUTES) {
+    const raw = read(name);
+    if (raw === undefined) continue;
+    notes.push(
+      `${label} ${name} "${raw.trim()}" has no Templatical equivalent; dropped.`,
+    );
+  }
+
+  return { hero, image, notes };
 }

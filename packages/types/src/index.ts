@@ -72,6 +72,17 @@ export {
   resolveBackgroundImage,
 } from "./background-image";
 
+// Hero mode (a one-column section rendered as mj-hero)
+export type {
+  AppliedHero,
+  HeroCandidate,
+  HeroNotAppliedReason,
+  HeroVerticalAlign,
+  ResolvedHero,
+  SectionHero,
+} from "./hero";
+export { HERO_VERTICAL_ALIGNS, imageAspectRatio, resolveHero } from "./hero";
+
 // Social icon glyphs (shared by the editor's inline SVG + the renderer's PNG rasterizer)
 export type { SocialIconGlyph } from "./social";
 export {

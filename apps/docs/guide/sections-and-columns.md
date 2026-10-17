@@ -144,6 +144,25 @@ card.styles.backgroundColor = '#ffffff';
 
 A section's `backgroundImage` paints an image behind its columns. Set `styles.backgroundColor` as well, as the fallback while the image loads and in clients that don't show background images. In the editor's **Background** panel you also choose the size (Fill, Fit or Original), a nine-point position and whether the image repeats. See the [Section block](/guide/blocks#section) for the email client notes on background images.
 
+### Hero
+
+A one-column section with a background image can render as a hero — an `mj-hero`, where the image fills the box and the content sits on top of it. Set `hero`:
+
+```ts
+const banner = createSectionBlock({
+  columns: '1',
+  backgroundImage: {
+    ...createBackgroundImage('https://cdn.example.com/hero.jpg'),
+    naturalWidth: 1200,
+    naturalHeight: 800,
+  },
+  hero: { height: 'image', verticalAlign: 'middle' },
+});
+banner.styles.backgroundColor = '#1f2937';
+```
+
+`height: 'image'` makes the box as tall as the image drawn across its desktop width, which needs the image file's size in `backgroundImage.naturalWidth` / `naturalHeight`. A phone keeps that height and crops the image at the sides to cover the narrower box. A media pick that knows the size (`width` / `height` on the asset or the `onRequestMedia` result) stores it with the URL; otherwise the editor measures the image. A number is a fixed height in px, padding included. In the editor, the **Background** panel's **Height** switches between **Fit content** (no hero), **Match image** and **Fixed**, and **Content position** places the content. The palette's **Hero** shortcut inserts one to fill in: a hero-mode section with a title, a paragraph and a button on a dark fill. See the [Section block](/guide/blocks#section) for the email client notes.
+
 ### Outer frame (wrapper)
 
 To frame a section in a colored band — e.g. a white card sitting on a blue background — set `wrapper`. It renders an `mj-wrapper` around the section, with its own background, padding, and corner radius. The band is as wide as the email body (`settings.width`), not the recipient's whole window:

@@ -248,7 +248,8 @@ Ein Layout-Container, der eine oder mehrere Spalten enthält. Siehe [Sektionen u
 | `stackOnMobile` | `boolean` | Weglassen oder `true`: Spalten stapeln auf Mobilgeräten (MJML-Standard). `false`: nebeneinander (`mj-group`) |
 | `borderRadius` | `BorderRadiusValue` | Eckenradius in px oder einer pro Ecke (optional; weglassen oder `0` für keine Abrundung) |
 | `border` | `BorderValue` | `{ top, right, bottom, left }`, jeweils `{ width, style, color }`, um die Sektion gezeichnet (optional; weglassen für keinen Rahmen) |
-| `backgroundImage` | `BackgroundImage` | Optionales Bild hinter der Sektion — `{ url, size, position: { x, y }, repeat }` — gerendert als `background-url` mit Größe, Position und Wiederholung an der `mj-section`. `size` ist `"cover"`, `"contain"` oder `"auto"`; `x` ist `"left"`, `"center"` oder `"right"`; `y` ist `"top"`, `"center"` oder `"bottom"`. `styles.backgroundColor` dient als Fallback. |
+| `backgroundImage` | `BackgroundImage` | Optionales Bild hinter der Sektion — `{ url, size, position: { x, y }, repeat }` — gerendert als `background-url` mit Größe, Position und Wiederholung an der `mj-section`. `size` ist `"cover"`, `"contain"` oder `"auto"`; `x` ist `"left"`, `"center"` oder `"right"`; `y` ist `"top"`, `"center"` oder `"bottom"`. `styles.backgroundColor` dient als Fallback. `naturalWidth` / `naturalHeight` (optional) sind die eigene Größe der Bilddatei in px; ein Hero übernimmt damit deren Form. |
+| `hero` | `SectionHero` | Optional. Stellt eine einspaltige Sektion mit Hintergrundbild als `mj-hero` dar, bei dem das Bild die Box hinter dem Inhalt füllt: `{ height, verticalAlign }`. `height` ist `"image"` (die Box ist so hoch wie das über ihre Desktop-Breite gezeichnete Bild, aus `backgroundImage.naturalWidth` / `naturalHeight`) oder eine feste Höhe in px, Innenabstand eingeschlossen; `verticalAlign` ist `"top"`, `"middle"` oder `"bottom"`. Das Bild füllt die Box immer (`size` und `repeat` gelten nicht), und es wird kein `border` gezeichnet. Mit mehr als einer Spalte, ohne Bild oder bei `"image"` ohne Größe wird die Sektion als normale Sektion dargestellt, und die Warnung `structure.hero-not-applied` nennt den Grund. |
 | `wrapper` | `SectionWrapper` | Optionaler äußerer Rahmen — `{ backgroundColor?, padding?, borderRadius?, backgroundImage? }` — gerendert als `mj-wrapper`-Band um die Sektion. Eine vom Host vorgegebene Karte um die Autorensektionen ist ein [Layout](/de/guide/layout)-Overlay. |
 
 ::: tip Hinweis zu E-Mail-Clients: Rahmen und Ecken in Outlook
@@ -262,6 +263,12 @@ Ein Layout-Container, der eine oder mehrere Spalten enthält. Siehe [Sektionen u
 - Ein Merge-Tag funktioniert als URL (zum Beispiel <code v-pre>{{ hero_url }}</code>). Die Arbeitsfläche zeigt dafür die Fallback-Farbe, da noch kein Bild geladen werden kann. Anführungszeichen im Tag werden URL-kodiert; vermeiden Sie daher Argumente in Anführungszeichen (<code v-pre>{{ hero | default: 'x.jpg' }}</code>).
 - Outlook unter Windows zeichnet das Bild mit VML; ein Bild in Originalgröße (`auto`) wird dort von oben mittig aus gekachelt, unabhängig von `position` und `repeat`.
 - In Outlook unter Windows überdeckt die Hintergrundfarbe eines Wrappers das Hintergrundbild der Sektion, und ein Bild auf Wrapper und Sektion zugleich zerstört das Layout. Der `structure`-Linter warnt vor beidem.
+:::
+
+::: tip Hinweis zu E-Mail-Clients: Heros
+- Ein Hero wird immer mit fester Höhe gerendert: Das klassische Outlook unter Windows ignoriert die fluide Höhe von MJML und würde die Box auf ihren Inhalt schrumpfen. **Wie Bild** setzt diese Höhe auf die eigene Höhe des Bilds über die Breite der Box. Auf einem Smartphone behält die Box daher ihre Desktop-Höhe, und das Bild wird seitlich beschnitten, um sie zu füllen.
+- Outlook unter Windows zeichnet das Bild mit VML ab der Oberkante der Box, in der Breite der Box und in der eigenen Höhe des Bilds bei dieser Breite, auf die Box zugeschnitten. Ist die Box niedriger als das Bild, zeigt sie den oberen Teil des Bilds, unabhängig von `position`.
+- Eine Merge-Tag-URL funktioniert mit einer festen Höhe. **Wie Bild** braucht die Größe des Bilds, die ein Merge-Tag erst beim Versand liefert. Ohne die Größe streckt Outlook unter Windows das Bild auf die Höhe der Box.
 :::
 
 ## Custom

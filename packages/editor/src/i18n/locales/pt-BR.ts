@@ -62,6 +62,7 @@ const ptBR: typeof en = {
   // Sidebar - Block types
   blocks: {
     section: "Seção",
+    hero: "Hero",
     image: "Imagem",
     title: "Título",
     paragraph: "Parágrafo",
@@ -171,6 +172,9 @@ const ptBR: typeof en = {
     wrapperLayoutConflict:
       "Este editor já emoldura o e-mail. Um quadro extra nesta seção não é suportado — a visualização e a exportação falharão.",
     stackOnMobile: "Empilhar no celular",
+    heroNeedsOneColumn:
+      "O modo hero precisa de uma coluna. Com mais colunas, esta seção aparece como uma seção normal.",
+    heroAddImage: "Adicione uma imagem de fundo",
   },
 
   // Text editor link dialog
@@ -483,6 +487,18 @@ const ptBR: typeof en = {
     backgroundPositionBottomCenter: "Embaixo no centro",
     backgroundPositionBottomRight: "Embaixo à direita",
     backgroundRepeat: "Repetir imagem",
+    heroHeight: "Altura",
+    heroHeightFit: "Ajustar ao conteúdo",
+    heroHeightImage: "Igual à imagem",
+    heroHeightFixed: "Fixa",
+    heroAlign: "Posição do conteúdo",
+    heroAlignTop: "Topo",
+    heroAlignMiddle: "Meio",
+    heroAlignBottom: "Base",
+    heroMatchImageMergeTag:
+      "“Igual à imagem” precisa de uma URL de imagem direta: uma merge tag não tem tamanho para ler.",
+    heroSizeUnknown:
+      "O tamanho desta imagem ainda não é conhecido, então a seção aparece com a altura do seu conteúdo.",
     display: "Exibição",
     showOnDesktop: "Mostrar no desktop",
     showOnMobile: "Mostrar no mobile",
