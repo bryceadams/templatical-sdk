@@ -6,6 +6,18 @@ import { findOpenTagEnd, getTagAttrValue } from "./html-scan";
 export interface SyntaxPreset {
   value: RegExp;
   logic: RegExp;
+  /**
+   * Opening delimiter that starts autocomplete for a custom syntax (e.g. `{`
+   * for `{first_name}`). Built-in presets resolve theirs automatically; a
+   * custom syntax without one has autocomplete disabled.
+   */
+  trigger?: string;
+  /**
+   * Closing delimiter for a custom syntax (e.g. `}`). Lets autocomplete tell an
+   * open tag from a completed one, so the popup doesn't reopen over a finished
+   * tag and a trailing closer is absorbed on insert.
+   */
+  closing?: string;
 }
 
 export type SyntaxPresetName =
@@ -37,10 +49,14 @@ const SYNTAX_CLOSING_CHARS: Record<SyntaxPresetName, string> = {
 
 /**
  * Resolves the autocomplete trigger string for a syntax preset.
- * Returns null when the syntax doesn't match any built-in preset
- * (custom regex syntax — autocomplete cannot be enabled safely).
+ * An explicit `trigger` wins; otherwise built-in presets are matched by their
+ * `value` regex. Returns null for a custom regex syntax without a `trigger`
+ * (autocomplete cannot be enabled safely).
  */
 export function getSyntaxTriggerChar(syntax: SyntaxPreset): string | null {
+  if (syntax.trigger) {
+    return syntax.trigger;
+  }
   for (const name of Object.keys(SYNTAX_PRESETS) as SyntaxPresetName[]) {
     if (SYNTAX_PRESETS[name].value.source === syntax.value.source) {
       return SYNTAX_TRIGGER_CHARS[name];
@@ -53,10 +69,13 @@ export function getSyntaxTriggerChar(syntax: SyntaxPreset): string | null {
  * Resolves the closing delimiter for a syntax preset (e.g. `}}` for liquid,
  * `|*` for mailchimp). The autocomplete trigger detector uses it to tell an
  * open tag (`{{first`) from a completed one (`{{first_name}}`) so the popup
- * doesn't reappear over a finished tag. Returns null for custom syntaxes —
- * the same set for which `getSyntaxTriggerChar` returns null.
+ * doesn't reappear over a finished tag. An explicit `closing` wins; returns
+ * null for a custom syntax without one.
  */
 export function getSyntaxClosingChar(syntax: SyntaxPreset): string | null {
+  if (syntax.closing) {
+    return syntax.closing;
+  }
   for (const name of Object.keys(SYNTAX_PRESETS) as SyntaxPresetName[]) {
     if (SYNTAX_PRESETS[name].value.source === syntax.value.source) {
       return SYNTAX_CLOSING_CHARS[name];

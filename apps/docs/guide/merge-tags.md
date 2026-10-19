@@ -158,8 +158,10 @@ If the built-in presets don't match your platform, define a custom syntax with t
 
 ```ts
 interface SyntaxPreset {
-  value: RegExp;  // matches data tags like ${user.name}
-  logic: RegExp;  // matches logic tags like $[IF ...]
+  value: RegExp;     // matches data tags like ${user.name}
+  logic: RegExp;     // matches logic tags like $[IF ...]
+  trigger?: string;  // opener that starts autocomplete, e.g. '${'
+  closing?: string;  // closer that ends a tag, e.g. '}'
 }
 ```
 
@@ -170,6 +172,8 @@ mergeTags: {
   syntax: {
     value: /\$\{.+?\}/g,
     logic: /\$\[\s*(\w+).*?\]/g,
+    trigger: '${',
+    closing: '}',
   },
   tags: [
     { label: 'User Name', value: '${user.name}' },
@@ -179,6 +183,8 @@ mergeTags: {
 ```
 
 The `value` regex detects data tags. The `logic` regex detects control flow statements — the first capture group `(\w+)` extracts the keyword (e.g., `IF`, `FOR`) which the editor uses as the display label.
+
+`trigger` and `closing` are optional. A regex can't tell the editor which characters open and close a tag, so set them to enable [autocomplete](#autocomplete) for a custom syntax: typing `trigger` opens the suggestion popup, and `closing` keeps it from reopening over a finished tag. Without `trigger`, autocomplete stays off for that syntax.
 
 ## Autocomplete
 
@@ -191,7 +197,7 @@ Filtering is case-insensitive and matches against both `label` and `value`. The 
 Autocomplete is enabled by default. It is **automatically disabled** when:
 
 - `tags` is empty (no candidates to suggest), or
-- `syntax` is a custom regex (the editor cannot infer a trigger string from arbitrary regexes).
+- `syntax` is a custom regex without a `trigger` (the editor cannot infer a trigger string from arbitrary regexes — see [Custom syntax](#custom-syntax)).
 
 To opt out explicitly, set `autocomplete: false`:
 

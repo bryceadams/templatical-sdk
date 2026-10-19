@@ -403,6 +403,21 @@ describe('getSyntaxTriggerChar', () => {
         expect(getSyntaxTriggerChar(empty)).toBe(null);
     });
 
+    it('returns the trigger of a custom syntax that declares one', () => {
+        const custom = { value: /\{[^{}\s]+\}/g, logic: /(?!)/g, trigger: '{', closing: '}' };
+        expect(getSyntaxTriggerChar(custom)).toBe('{');
+    });
+
+    it('prefers an explicit trigger over a matching preset', () => {
+        const custom = { ...SYNTAX_PRESETS.liquid, trigger: '{{ ' };
+        expect(getSyntaxTriggerChar(custom)).toBe('{{ ');
+    });
+
+    it('ignores an empty trigger', () => {
+        const custom = { value: /<<.+?>>/g, logic: /<%.+?%>/g, trigger: '' };
+        expect(getSyntaxTriggerChar(custom)).toBe(null);
+    });
+
     it('matches by source even when regex flags differ', () => {
 
         const cloned = {
@@ -437,6 +452,16 @@ describe('getSyntaxClosingChar', () => {
 
     it('returns null for custom syntax', () => {
         const custom = { value: /<<.+?>>/g, logic: /<%.+?%>/g };
+        expect(getSyntaxClosingChar(custom)).toBe(null);
+    });
+
+    it('returns the closing of a custom syntax that declares one', () => {
+        const custom = { value: /<<.+?>>/g, logic: /<%.+?%>/g, trigger: '<<', closing: '>>' };
+        expect(getSyntaxClosingChar(custom)).toBe('>>');
+    });
+
+    it('returns null for a custom syntax with a trigger but no closing', () => {
+        const custom = { value: /<<.+?>>/g, logic: /<%.+?%>/g, trigger: '<<' };
         expect(getSyntaxClosingChar(custom)).toBe(null);
     });
 

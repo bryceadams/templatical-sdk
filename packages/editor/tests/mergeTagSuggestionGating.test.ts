@@ -88,6 +88,22 @@ describe('MergeTagSuggestion gate', () => {
     ).toBe(false);
   });
 
+  it('appends when a custom syntax declares a trigger', () => {
+    const custom: SyntaxPreset = {
+      value: /\{[^{}\s]+\}/g,
+      logic: /(?!)/g,
+      trigger: '{',
+      closing: '}',
+    };
+    expect(
+      shouldAppendSuggestion({
+        mergeTags: [{ label: 'First', value: '{first}' }],
+        syntax: custom,
+        autocompleteEnabled: true,
+      }),
+    ).toBe(true);
+  });
+
   it('does NOT append when autocomplete is disabled by consumer', () => {
     expect(
       shouldAppendSuggestion({

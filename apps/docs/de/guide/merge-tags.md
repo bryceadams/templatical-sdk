@@ -158,8 +158,10 @@ Wenn die integrierten Presets nicht zu Ihrer Plattform passen, definieren Sie ei
 
 ```ts
 interface SyntaxPreset {
-  value: RegExp;  // matches data tags like ${user.name}
-  logic: RegExp;  // matches logic tags like $[IF ...]
+  value: RegExp;     // matches data tags like ${user.name}
+  logic: RegExp;     // matches logic tags like $[IF ...]
+  trigger?: string;  // opener that starts autocomplete, e.g. '${'
+  closing?: string;  // closer that ends a tag, e.g. '}'
 }
 ```
 
@@ -170,6 +172,8 @@ mergeTags: {
   syntax: {
     value: /\$\{.+?\}/g,
     logic: /\$\[\s*(\w+).*?\]/g,
+    trigger: '${',
+    closing: '}',
   },
   tags: [
     { label: 'User Name', value: '${user.name}' },
@@ -179,6 +183,8 @@ mergeTags: {
 ```
 
 Die `value`-Regex erkennt Daten-Tags. Die `logic`-Regex erkennt Kontrollflussanweisungen — die erste Erfassungsgruppe `(\w+)` extrahiert das Schlüsselwort (z. B. `IF`, `FOR`), das der Editor als Anzeigelabel verwendet.
+
+`trigger` und `closing` sind optional. Eine Regex verrät dem Editor nicht, welche Zeichen ein Tag öffnen und schließen. Setzen Sie sie daher, um die [Autovervollständigung](#autovervollstandigung) für eine benutzerdefinierte Syntax zu aktivieren: Die Eingabe von `trigger` öffnet das Vorschlags-Popup, und `closing` verhindert, dass es sich über einem fertigen Tag erneut öffnet. Ohne `trigger` bleibt die Autovervollständigung für diese Syntax deaktiviert.
 
 ## Autovervollständigung
 
@@ -191,7 +197,7 @@ Die Filterung ist nicht groß-/kleinschreibungsabhängig und gleicht sowohl `lab
 Die Autovervollständigung ist standardmäßig aktiviert. Sie wird **automatisch deaktiviert**, wenn:
 
 - `tags` leer ist (keine Kandidaten zum Vorschlagen) oder
-- `syntax` eine benutzerdefinierte Regex ist (der Editor kann aus beliebigen Regex-Mustern keine Trigger-Zeichenkette ableiten).
+- `syntax` eine benutzerdefinierte Regex ohne `trigger` ist (der Editor kann aus beliebigen Regex-Mustern keine Trigger-Zeichenkette ableiten — siehe [Benutzerdefinierte Syntax](#benutzerdefinierte-syntax)).
 
 Um sie explizit zu deaktivieren, setzen Sie `autocomplete: false`:
 

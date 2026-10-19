@@ -215,6 +215,52 @@ describe("useMergeTagAutocomplete — selection", () => {
   });
 });
 
+describe("useMergeTagAutocomplete — custom syntax with delimiters", () => {
+  const SINGLE_BRACE = {
+    value: /\{[^{}\s]+\}/g,
+    logic: /(?!)/g,
+    trigger: "{",
+    closing: "}",
+  };
+  const SINGLE_BRACE_TAGS: MergeTag[] = [
+    { label: "First Name", value: "{first_name}" },
+    { label: "Last Name", value: "{last_name}" },
+  ];
+
+  function setupSingleBrace(value: string, caret: number) {
+    return setupDriver({
+      syntax: SINGLE_BRACE,
+      tags: SINGLE_BRACE_TAGS,
+      value,
+      caret,
+    });
+  }
+
+  it("is available and opens on the declared trigger", () => {
+    const { driver } = setupSingleBrace("Hi {la", 6);
+    expect(driver.available.value).toBe(true);
+
+    driver.refresh();
+
+    expect(driver.isOpen()).toBe(true);
+  });
+
+  it("inserts the picked tag and absorbs the declared closer", () => {
+    const { driver, emit } = setupSingleBrace("Hi {la} there", 6);
+    driver.refresh();
+
+    driver.handleKeydown(key("Enter"));
+
+    expect(emit).toHaveBeenCalledWith("Hi {last_name} there");
+  });
+
+  it("does not reopen over a tag completed with the declared closer", () => {
+    const { driver } = setupSingleBrace("{first_name}", 12);
+    driver.refresh();
+    expect(driver.isOpen()).toBe(false);
+  });
+});
+
 describe("useMergeTagAutocomplete — keyboard routing", () => {
   it("returns false for any key when the popup is closed", () => {
     const { driver } = setupDriver();

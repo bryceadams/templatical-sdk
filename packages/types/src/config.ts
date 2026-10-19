@@ -175,8 +175,9 @@ export interface MergeTagsConfig {
    * same popup, so behavior is identical.
    *
    * Defaults to `true`. Effective only when `tags` is non-empty AND
-   * `syntax` matches a built-in preset (custom regex syntaxes cannot be
-   * mapped to a trigger string and silently disable autocomplete).
+   * `syntax` is a built-in preset or a custom syntax with a `trigger`
+   * (custom regex syntaxes without one cannot be mapped to a trigger string
+   * and silently disable autocomplete).
    */
   autocomplete?: boolean;
 }
