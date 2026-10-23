@@ -88,12 +88,12 @@ describe('MergeTagSuggestion gate', () => {
     ).toBe(false);
   });
 
-  it('appends when a custom syntax declares a trigger', () => {
+  it('appends when a custom syntax declares an opener', () => {
     const custom: SyntaxPreset = {
       value: /\{[^{}\s]+\}/g,
       logic: /(?!)/g,
-      trigger: '{',
-      closing: '}',
+      opener: '{',
+      closer: '}',
     };
     expect(
       shouldAppendSuggestion({

@@ -7,17 +7,21 @@ export interface SyntaxPreset {
   value: RegExp;
   logic: RegExp;
   /**
-   * Opening delimiter that starts autocomplete for a custom syntax (e.g. `{`
-   * for `{first_name}`). Built-in presets resolve theirs automatically; a
-   * custom syntax without one has autocomplete disabled.
+   * The characters that open a data tag, e.g. `{` for `{first_name}` or `%`
+   * for `%FIRSTNAME%`. Typing them opens merge-tag autocomplete. The built-in
+   * presets have their own; a custom syntax without one, or with only
+   * whitespace, gets no autocomplete. A space inside it is kept, for tags
+   * written with one: the query ends at whitespace, so `{{ first_name }}`
+   * needs `'{{ '`.
    */
-  trigger?: string;
+  opener?: string;
   /**
-   * Closing delimiter for a custom syntax (e.g. `}`). Lets autocomplete tell an
-   * open tag from a completed one, so the popup doesn't reopen over a finished
-   * tag and a trailing closer is absorbed on insert.
+   * The characters that close a data tag, e.g. `}`. Inserting a suggestion
+   * absorbs a closer already typed after the caret, so `{fir}` becomes
+   * `{first_name}`, not `{first_name}}`. It may equal `opener`. Whitespace
+   * only counts as unset.
    */
-  closing?: string;
+  closer?: string;
 }
 
 export type SyntaxPresetName =
@@ -47,15 +51,20 @@ const SYNTAX_CLOSING_CHARS: Record<SyntaxPresetName, string> = {
   ampscript: "=%%",
 };
 
+/** A declared delimiter counts only when it has a non-whitespace character. */
+function declaredDelimiter(value: string | undefined): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
 /**
- * Resolves the autocomplete trigger string for a syntax preset.
- * An explicit `trigger` wins; otherwise built-in presets are matched by their
- * `value` regex. Returns null for a custom regex syntax without a `trigger`
- * (autocomplete cannot be enabled safely).
+ * Resolves the autocomplete trigger for a syntax: its declared `opener`, else
+ * the opener of the built-in preset whose `value` regex it uses. Returns null
+ * for a custom syntax without an opener, which turns autocomplete off.
  */
 export function getSyntaxTriggerChar(syntax: SyntaxPreset): string | null {
-  if (syntax.trigger) {
-    return syntax.trigger;
+  const opener = declaredDelimiter(syntax.opener);
+  if (opener !== null) {
+    return opener;
   }
   for (const name of Object.keys(SYNTAX_PRESETS) as SyntaxPresetName[]) {
     if (SYNTAX_PRESETS[name].value.source === syntax.value.source) {
@@ -66,15 +75,15 @@ export function getSyntaxTriggerChar(syntax: SyntaxPreset): string | null {
 }
 
 /**
- * Resolves the closing delimiter for a syntax preset (e.g. `}}` for liquid,
- * `|*` for mailchimp). The autocomplete trigger detector uses it to tell an
- * open tag (`{{first`) from a completed one (`{{first_name}}`) so the popup
- * doesn't reappear over a finished tag. An explicit `closing` wins; returns
- * null for a custom syntax without one.
+ * Resolves the closing delimiter for a syntax (e.g. `}}` for liquid, `|*` for
+ * mailchimp): its declared `closer`, else the closer of the built-in preset
+ * whose `value` regex it uses. Autocomplete absorbs it after the caret on
+ * insert. Returns null for a custom syntax without a closer.
  */
 export function getSyntaxClosingChar(syntax: SyntaxPreset): string | null {
-  if (syntax.closing) {
-    return syntax.closing;
+  const closer = declaredDelimiter(syntax.closer);
+  if (closer !== null) {
+    return closer;
   }
   for (const name of Object.keys(SYNTAX_PRESETS) as SyntaxPresetName[]) {
     if (SYNTAX_PRESETS[name].value.source === syntax.value.source) {
