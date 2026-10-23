@@ -57,7 +57,9 @@ unmount();
 | `render`             | `RenderProvider`                                                  | No       | Rendering backend for `toMjml()` / `toHtml()`. Every method (`toMjml`, `toHtml`, `compileMjml`) is independently optional and resolved separately. Omit and `toMjml()` renders locally while `toHtml()` rejects — the SDK bundles no MJML compiler. See [Rendering & Export](/backend/render)                                                                                                                                                                                                                                  |
 | `versionHistory`     | `VersionHistoryProvider`                                          | No       | Storage backend for the template's version history — the past states a user can browse, preview and restore. The editor provides the header control, preview banner and restore flow; you provide the storage. The same object also carries the `onCreated` and `onRestored` events. It never records a version itself: your `templates.save` decides that. Omit to disable the feature entirely. See [Version History](/backend/version-history)                                                                              |
 | `comments`           | `CommentsProvider`                                                | No       | Storage backend for review comments — threads anchored to a block or the template. The same object also carries the `onCreated`, `onUpdated`, `onDeleted`, `onResolved` and `onUnresolved` events. The editor provides the sidebar, the composer, resolve/reply and the block indicators; you provide persistence. **Requires `user`**: without an identity the feature reports itself unavailable rather than writing anonymous comments. An optional `subscribe` pushes remote changes in. See [Comments](/backend/comments) |
-| `user`               | `EditorUser`                                                      | No       | Who is using the editor — `{ id, name }`. Needed by any feature that attributes work to a person; today that is `comments`. Not a security boundary: it identifies the user to the editor's UI, in the user's own browser. Attribute writes server-side from the session your backend already trusts                                                                                                                                                                                                                           |
+| `collaboration`      | `CollaborationProvider`                                           | No       | Real-time collaboration over your backend: every edit is sent as a batch of [operations](/api/operations) through `submit`, other sessions' batches are applied in revision order, selecting a block takes its lock, the header shows who else is here, and undo sends inverse operations your backend can refuse. **Requires `templates`**, whose `load` returns the template's `revision`; `templates.save` then receives only renames. The three lock methods are optional together. See [Collaboration](/backend/collaboration) |
+| `onRemoteChange`     | `(change: CollaborationRemoteChange) => void`                     | No       | Called with `{ actor, ops }` after another session's batch is applied on the canvas. Not called for this editor's own edits, nor for a re-sync that reloads the template |
+| `user`               | `EditorUser`                                                      | No       | Who is using the editor — `{ id, name }`. Needed by any feature that attributes work to a person: `comments`, and `collaboration`, whose header bar leaves this user's own sessions out. Not a security boundary: it identifies the user to the editor's UI, in the user's own browser. Attribute writes server-side from the session your backend already trusts                                                                                                                                                                                                                           |
 | `changeDebounce`     | `number`                                                          | No       | How long the editor waits after the last edit before `onChange` fires and, when `templates.autoSave` is on, before it saves. One timer drives both, so it paces `onChange` even with no `templates` provider configured. Defaults to `2000`. See [Saving & Loading](/backend/templates#autosave)                                                                                                                                                                                                                               |
 | `onRequestMedia`     | `(context?: MediaRequestContext) => Promise<MediaResult \| null>` | No       | UI override for the media picker (Bynder, Cloudinary widget, a host modal). Wins over `media` when both are set. Return `{ url, alt?, width?, height? }` or `null`. See [Images](/guide/images) and [Media](/backend/media)                                                                                                                                                                                                                                                                                                                     |
 | `resolveImageUrl`    | `(src: string) => string \| null \| Promise<string \| null>`      | No       | Display-only resolver for image `src` values, and for the background image URLs of sections, section wrappers and layout wrapper bands (never for a merge-tag URL): maps a canonical src to a preview URL for the canvas. Content and `toMjml()` output keep the canonical value. Return `null` to use the src as-is. Called once per committed src (debounced), cached per src. See [Images](/guide/images#display-only-url-resolution)                                                                                                                                                  |
@@ -370,12 +372,35 @@ import { useHistory } from "@templatical/core";
 const history = useHistory({
   content: editor.content,
   setContent: editor.setContent,
-  isRemoteOperation: () => false, // skip recording during remote/collab updates
   maxSize: 50,
 });
 
 history.undo();
 history.redo();
+```
+
+### `useCollaboration(options)`
+
+Runs a collaboration session over a [`CollaborationProvider`](/backend/collaboration): it sends the editor's changes as operation batches, applies other sessions' batches in revision order, takes the selected block's lock, tracks who is here, and keeps undo and redo as inverse batches. `init({ collaboration })` builds it for you; call it yourself only for an editor of your own on `useEditor`.
+
+```ts
+import { useCollaboration, useEditor } from "@templatical/core";
+
+const collaboration = useCollaboration({
+  provider: myCollaborationProvider,
+  loadTemplate: (id) => myTemplatesProvider.load(id),
+  onNotice: (notice) => showNotice(notice),
+});
+const editor = useEditor({
+  content,
+  templates: myTemplatesProvider,
+  lockedBlocks: collaboration.locks,
+});
+collaboration.attach(editor);
+await editor.load("tpl_123");
+
+collaboration.undo();
+await collaboration.settle(); // resolves once every batch is confirmed
 ```
 
 ### `useBlockActions(options)`
@@ -704,6 +729,133 @@ The editor already warns on tab close when a `templates` provider is configured 
 
 ---
 
+# Operations
+
+Source: https://docs.templatical.com/api/operations
+
+An operation is one change to a template: add, move, delete or update a block, update the settings, or replace the whole content. The same six operations travel everywhere a template changes outside a single editor:
+
+- **[Collaboration](/backend/collaboration)** — an editor with `init({ collaboration })` sends every edit to your backend as a batch of operations, and applies other people's batches.
+- **The CLI** — `template-tools edit` applies them to a template file.
+- **Templatical Cloud** — stores every batch with its revision, and AI agents connected to its MCP server edit with the same vocabulary through `edit_template`.
+
+`applyOperations` from `@templatical/types` (MIT) applies them. Templatical Cloud's server runs an engine with the same rules, and a shared set of test cases keeps the two identical.
+
+## The six operations
+
+```json
+{"op": "addBlock",       "block": {"id": "b2", "type": "paragraph", "content": "<p>Hi</p>", "styles": {"padding": {"top": 0, "right": 0, "bottom": 0, "left": 0}}}, "parent": null, "after": "b1"}
+{"op": "moveBlock",      "blockId": "b2", "parent": {"sectionId": "s1", "column": 0}, "after": null}
+{"op": "deleteBlock",    "blockId": "b2"}
+{"op": "updateBlock",    "blockId": "b1", "set": {"content": "<p>Hello</p>"}, "unset": ["visibility"]}
+{"op": "updateSettings", "set": {"width": 640}, "unset": ["preheaderText"]}
+{"op": "setContent",     "content": {"blocks": [], "settings": {"width": 600, "backgroundColor": "#ffffff", "textColor": "#1a1a1a", "linkUnderline": true, "fontFamily": "Arial", "locale": "en"}}}
+```
+
+Engine acceptance of an operation does not replace schema validation: run `template-tools validate` on the resulting template.
+
+A batch is a list of operations. It applies in order, each operation seeing the ones before it, and all or nothing: when one is refused, none of the batch applies.
+
+### Positions
+
+Positions name a sibling, never an index, so an operation means the same thing after someone else's change lands first.
+
+- `parent` is `null` for the top level, or `{"sectionId": "…", "column": 0}` for a column of a section. `column` is a 0-based index into the section's `children`.
+- `after` is the id of the block to land after, or `null` to land first. For `moveBlock`, the siblings are those of the target container with the moved block taken out.
+- `parent` and `after` are required on `addBlock` and `moveBlock`, even when they are `null`.
+
+### Sections and columns
+
+- A section sits only at the top level. Adding or moving a section into a column is refused, and so is a new section with a section among its children.
+- `deleteBlock` on a section deletes its blocks with it.
+- `updateBlock` replaces each key in `set` whole, a `styles` object included, and removes the keys in `unset`. `id`, `type` and `children` can't be set or unset, and neither can a section's `columns` be unset.
+- `set: {"columns": …}` on a section resizes its `children` to the layout's column count: `"1"` has one column, `"3"` has three, and every other layout (`"2"`, `"2-1"`, `"1-2"`) has two. Growing appends empty columns. Shrinking drops trailing columns only when they are empty, so move their blocks out first.
+- A new block needs a non-empty string `id` and a string `type`, and every id in it, a new section's children included, must be new to the template.
+
+### Preconditions
+
+Any operation but `addBlock` and `setContent` can carry `expect`, which must hold before it applies. A mismatch refuses the operation with `precondition_failed`. Undo uses this, so an undo that someone else's edit has overtaken is refused instead of overwriting it.
+
+- `updateBlock` and `updateSettings`: `expect` maps keys to their expected current values. `null` matches a `null` value or an absent key.
+- `moveBlock`: `expect.parent` and `expect.after` are the block's current position. A key left out counts as `null`.
+- `deleteBlock`: `expect.block` is the whole current block, children included, compared exactly.
+- Values compare as JSON: object key order is ignored, arrays compare in order, and numbers by value, so `1` equals `1.0`. `set`, `unset` and `expect` given as `null` count as absent.
+
+### Locks
+
+A backend passes the locks it holds and the acting session: `applyOperations(content, ops, { locks, session })`, with `locks` as `[{ blockId, sessionId }]`.
+
+- `updateBlock`, `moveBlock` and `deleteBlock` on a block another session holds are refused with `lock_held`. Moving or deleting a section also checks every block inside it.
+- `setContent` is refused with `locked_by_others` while any other session holds a lock.
+- With `session` set to `null` (a server-side change), every lock belongs to someone else.
+
+## Errors
+
+A refused batch throws an `OperationError` with `code` and `opIndex`, the 0-based index of the refused operation.
+
+| Code | When | Templatical Cloud answers |
+|---|---|---|
+| `block_exists` | A new block's id, or an id inside it, is already in the template | 409 |
+| `block_missing` | The block, or the parent section, isn't there | 409 |
+| `anchor_missing` | The `after` block isn't in the target container | 409 |
+| `precondition_failed` | `expect` doesn't hold | 409 |
+| `lock_held` | Another session holds the block | 409 |
+| `locked_by_others` | Another session holds a lock, for `setContent` | 409 |
+| `invalid_operation` | The operation is malformed or can never apply | 422 |
+
+### Which error wins
+
+When one operation breaks several rules, the first failing check decides:
+
+1. Its shape (`invalid_operation`): a malformed operation, a missing required key, a new section with a parent, `id`/`type`/`children` in `set` or `unset`, a section's `columns` in `unset`.
+2. The blocks it names (`block_missing`, `block_exists`).
+3. Locks (`lock_held`, `locked_by_others`).
+4. Preconditions (`precondition_failed`).
+5. Placement (`invalid_operation`): a section into a column, a block after itself.
+6. The target container: `block_missing` for a missing parent section; `invalid_operation` for a parent that isn't a section or a column out of range.
+7. The anchor (`anchor_missing`).
+8. The change itself (`invalid_operation`): a layout that would drop columns that still hold blocks.
+
+## Applying operations
+
+```ts
+import {
+  applyOperations,
+  OperationError,
+  type Operation,
+} from '@templatical/types';
+
+const ops: Operation[] = [
+  { op: 'updateBlock', blockId: 'b1', set: { content: '<p>Hello</p>' } },
+];
+
+try {
+  const next = applyOperations(template.content, ops, {
+    locks: [{ blockId: 'b4', sessionId: 'f7c1…' }],
+    session: requestSessionId,
+  });
+  // store `next`
+} catch (error) {
+  if (error instanceof OperationError) {
+    // error.code, error.opIndex
+  }
+  throw error;
+}
+```
+
+`applyOperations` returns a new document and never changes the one you pass. `applyOperationsInPlace` changes it directly, for a copy you can throw away. `getColumnCount(layout)` is the layout rule above.
+
+## In the CLI
+
+```bash
+npx -y @templatical/template-tools edit emails/welcome.json \
+  --op '{"op":"updateBlock","blockId":"button_1","set":{"backgroundColor":"#1d4ed8"}}'
+```
+
+`--ops <file>` takes a JSON array for a batch. See [Template Tools](/api/template-tools).
+
+---
+
 # Renderer
 
 Source: https://docs.templatical.com/api/renderer-typescript
@@ -986,7 +1138,7 @@ Every command follows the same shape:
 npx -y @templatical/template-tools <command> [options]
 ```
 
-Add `--json` to any command for a single parseable JSON document on stdout. Installed as a project dependency instead, the binary is named `templatical`.
+Add `--json` for machine-readable result output on stdout when a command produces a result; usage and tool errors (2, 3) go to stderr without a result document. Installed as a project dependency instead, the binary is named `templatical`.
 
 **Pin an exact version in CI.** The CLI and the block model it validates against (`@templatical/types`) are released together, so an unpinned call always matches itself — but it can grow stricter between two runs with no change of yours to explain it. Pinning makes a version bump a reviewable diff instead.
 
@@ -994,7 +1146,7 @@ Add `--json` to any command for a single parseable JSON document on stdout. Inst
 
 | Command | Does |
 |---|---|
-| `validate <file>` | Structural check, then the quality lint |
+| `validate <file> [--html]` | Structural check, then the quality lint |
 | `schema [--out <file>]` | Print the block JSON Schema |
 | `render <file> [--format mjml\|html] [-o <file>]` | Render to MJML, or to sending-ready HTML |
 | `edit <file> --op '<json>'` \| `--ops <file>` | Apply one operation, or a batch, and write the result |
@@ -1036,12 +1188,12 @@ Defaults to `--format mjml`. `--format html` compiles that MJML further and need
 
 ```bash
 npx -y @templatical/template-tools edit emails/welcome.json \
-  --op '{"operation":"updateBlock","data":{"blockId":"button_1","updates":{"backgroundColor":"#1d4ed8"}}}'
+  --op '{"op":"updateBlock","blockId":"button_1","set":{"backgroundColor":"#1d4ed8"}}'
 ```
 
-One operation via `--op '<json>'`, or a batch via `--ops <file>` pointing at a JSON array of the same shape — never both. Each operation is `{ "operation": "<name>", "data": {...} }`, where `operation` is one of the seven the editor itself uses: `addBlock`, `updateBlock`, `deleteBlock`, `moveBlock`, `updateSettings`, `setContent`, `updateBlockStyle`.
+One operation via `--op '<json>'`, or a batch via `--ops <file>` pointing at a JSON array of the same shape — never both. The operations are the vocabulary the editor, collaboration backends and Templatical Cloud share — `addBlock`, `moveBlock`, `deleteBlock`, `updateBlock`, `updateSettings` and `setContent` — described in the [Operations reference](/api/operations). An operation in the old `{ "operation", "data" }` form is refused with a pointer to the new one.
 
-A batch is all-or-nothing: the first operation that would be rejected stops the whole batch, nothing is written, and the error names which operation (by index) and why. Even once every operation in a batch succeeds, the result is re-validated structurally before anything is written — a sequence that produces an invalid document is refused and the file is left untouched. On success, `edit` overwrites `<file>` in place; there's no `--out`.
+A batch is applied in order and all or nothing: the first operation that is refused stops the whole batch, nothing is written, and the error names the operation, its code and the reason (`Operation 2 (updateBlock) was refused: block_missing — …`). Even once every operation in a batch succeeds, the result is re-validated structurally before anything is written — a sequence that produces an invalid document is refused and the file is left untouched. On success, `edit` overwrites `<file>` in place; there's no `--out`.
 
 ### `import <file> [--format <fmt>] [--out <name>]` or `import --list-formats`
 
@@ -1099,10 +1251,10 @@ Lists every working template under `.templatical/` (or `--cwd`'s `.templatical/`
 
 | Code | Meaning |
 |---|---|
-| `0` | Success. `validate` may still report `warning`/`info` lint findings — see below. |
-| `1` | The template is invalid: a structural error, or a quality-lint finding of severity `error`. For `custom-block`, an `error`-severity issue in the definition, or a failed `fetch` request. |
-| `2` | Usage error — bad flags, a missing argument, an unreadable or unparseable input file. |
-| `3` | An optional dependency isn't installed. The error message names the exact install command. |
+| `0` | Valid, with no error-severity lint for `validate`; success for other commands. |
+| `1` | Invalid structure or any `severity: "error"` lint issue (output can still say `valid: true`). For `custom-block`, an `error`-severity issue in the definition, or a failed `fetch` request. |
+| `2` | Misuse or a broken tool — bad flags, a missing argument, unreadable or unparseable input, or an unexpected internal error. |
+| `3` | A missing optional dependency. The error message names the exact install command. |
 
 ::: tip Exit code 3 is not a failure
 It means the CLI did its job and hit an optional piece it can't do without — the `mjml` package for `render --format html`, or a converter package for `import`. Handle it differently from `1`/`2` in any script or CI step you write: `3` means "install one thing and re-run," not "something is wrong with this template."
@@ -1110,11 +1262,11 @@ It means the CLI did its job and hit an optional piece it can't do without — t
 
 ## Reading `--json`
 
-Every command's `--json` output is exactly one parseable document on stdout — nothing else is ever written there in that mode. Diagnostics, progress notes and human-readable errors all go to stderr instead, in both modes, so `<command> --json | jq .` is always safe to pipe.
+When a command produces a result, `--json` emits a parseable result document on stdout. Usage and tool errors (2, 3) go to stderr without a result document. Diagnostics and progress notes also go to stderr; check the exit code before consuming stdout.
 
-`validate --json` emits `{ valid, errors, issues }`. `errors` is the structural error list, populated only when `valid` is `false`. `issues` is `@templatical/quality`'s complete report against the template — every accessibility, structure and link finding, at whatever severity that rule defaults to (`error`, `warning`, or `info`) — regardless of whether that finding affected the exit code.
+`validate --json` emits `{ valid, errors, issues }` (plus `htmlBytes` with `--html`). `errors` is the structural error list, populated only when `valid` is `false`. `issues` is `@templatical/quality`'s complete report against the template — every accessibility, structure and link finding, at whatever severity that rule defaults to (`error`, `warning`, or `info`) — regardless of whether that finding affected the exit code.
 
-**The thing this gets people:** `issues.length > 0` is not "the template failed." Most rules default to `warning` or `info` and are advisory only. A handful — missing image `alt` text, a `javascript:` URL, a duplicate block ID, low-contrast text, and a few more — default to `error`, and those *do* fail the command: `validate` already computed this for you, which is exactly what the exit code is for (`1` for a structural failure or any `severity: "error"` issue, `0` otherwise). A CI script that fails the build because the `issues` array is non-empty will reject templates the command itself considers passing. Trust the exit code — or the top-level `valid` field, if you want it in-process — over hand-rolling an "any issue fails" check against `issues`.
+`valid: true` alone does not mean exit 0: `valid` reports structural validity, while any `severity: "error"` lint issue makes `validate` exit 1 with `valid: true` and an empty `errors` array. Warnings and info never change the exit code. Act on the exit code as the command's result; `issues.length > 0` alone is not a failure condition.
 
 ## Using it in CI
 
@@ -1175,14 +1327,14 @@ import {
   schema,
   validateTemplate,
   runQualityLint,
-  applyOperation,
+  applyOperations,
+  OperationError,
   getColumnCount,
   checkCustomBlock,
   validateCustomBlockDefinition,
   SPECIMEN_STATES,
   type ValidationResult,
   type QualityLintResult,
-  type OperationResult,
   type CustomBlockCheckResult,
   type CustomBlockWorkingFile,
 } from "@templatical/template-tools";
@@ -1191,8 +1343,7 @@ import {
 - **`schema`** — the generated JSON Schema for `TemplateContent`, as a plain object. Same content the `schema` command prints and the published `schema.json` file (below) contains.
 - **`validateTemplate(data: unknown): ValidationResult`** — the same discriminator-aware structural check `validate` runs. Synchronous; needs only `ajv` and the committed schema, no build step and no other workspace package.
 - **`runQualityLint(data: unknown): QualityLintResult`** — `@templatical/quality`'s `lintTemplate` layered on top, assuming structurally-valid input. Wrapped in a try/catch, so a malformed template can't crash the caller: `{ issues, error? }`, where `error` is only set if the linter itself threw.
-- **`applyOperation(content: TemplateContent, payload: TemplateOperationPayload): OperationResult`** — the pure reducer behind `edit --op`. Never mutates `content`; returns `{ ok, content, error? }`, where `content` on a rejection is the same object passed in, provably untouched.
-- **`getColumnCount(layout: ColumnLayout): number`** — columns a section layout declares: `'1'` → `1`, `'3'` → `3`, everything else (`'2'`, `'2-1'`, `'1-2'`) → `2`. Mirrors the identical helper in `@templatical/core`'s own editor, reimplemented here because this package never imports core — see "How it relates to the other packages" below.
+- **`applyOperations(content, ops, context?)`**, **`OperationError`** and **`getColumnCount(layout)`** — the operation engine behind `edit`, re-exported from `@templatical/types`. `applyOperations` returns a new document and never changes `content`; a refused batch throws an `OperationError` carrying `code` and `opIndex`. See the [Operations reference](/api/operations).
 - **`checkCustomBlock(data: unknown, options?: CheckCustomBlockOptions): Promise<CustomBlockCheckResult>`** — the checks `custom-block validate` runs, returning `{ valid, issues }`. It takes a JSON working file or the object a definition module exports, `dataSource` function included, so the same check can run in your own tests over the definitions you ship. Pass `compileMjml` in `options` to add the MJML compile check; without it that check is skipped.
 - **`validateCustomBlockDefinition(data: unknown): CustomBlockCheckResult`** — the structural check alone, synchronous. `checkCustomBlock` runs it first.
 - **`SPECIMEN_STATES`** — the specimen state names `custom-block render --state` accepts.
@@ -1211,7 +1362,7 @@ Node-only (`node:http`, `node:fs`) — a separate subpath so a bundler building 
 
 The raw generated JSON Schema as a `.json` file — importable anywhere your bundler or runtime can load JSON (`import schema from "@templatical/template-tools/schema.json"`, or read it with `fetch`/`fs.readFileSync` outside a bundler). Identical content to the `schema` export above and to what the `schema` command prints.
 
-**Building a "generate with AI" feature into your own product?** This is what you need. The bundled [Agent Skill](/guide/agent-skill) runs exactly this loop for a coding agent: read the block schema as grounding, generate a template, validate what comes back, and feed any errors to the model until it passes. `schema.json` and `validateTemplate` are the two pieces of that loop this package gives you directly — hand the schema to your model (a system prompt, a tool definition, structured-output mode, whatever your provider supports), then run its output through `validateTemplate` before you trust it. Nothing else in this package is relevant to that path: `runQualityLint`, `applyOperation` and `./live` all assume you already have a structurally valid template to work with.
+**Building a "generate with AI" feature into your own product?** This is what you need. The bundled [Agent Skill](/guide/agent-skill) runs exactly this loop for a coding agent: read the block schema as grounding, generate a template, validate what comes back, and feed any errors to the model until it passes. `schema.json` and `validateTemplate` are the two pieces of that loop this package gives you directly — hand the schema to your model (a system prompt, a tool definition, structured-output mode, whatever your provider supports), then run its output through `validateTemplate` before you trust it. Nothing else in this package is relevant to that path: `runQualityLint`, `applyOperations` and `./live` all assume you already have a structurally valid template to work with.
 
 ### `@templatical/template-tools/custom-block-schema.json`
 
@@ -1221,7 +1372,9 @@ The JSON Schema for a custom block working file — a `CustomBlockDefinition` wi
 
 Builds on three MIT packages, all real `dependencies` rather than peers, so none of them are optional: `@templatical/types` for the block model the schema is generated from, `@templatical/quality` for the lint `validate` layers on top, and `@templatical/renderer` for the MJML output `render` produces. It is not the editor — there's no visual surface in this package, and nothing in it mounts UI or touches a DOM.
 
-It never imports `@templatical/core`, which is under [FSL-1.1-MIT](/license-faq) rather than plain MIT, like the editor and the media library. `edit`'s operation reducer (`applyOperation`) reimplements the same invariants core's own editor mutators enforce — most importantly, that a section can never land inside a column, because MJML forbids nesting `mj-section` inside `mj-column` — instead of importing them. That is a real maintenance cost: the two implementations can drift apart, which is exactly why this package's own test suite checks both descriptions of each invariant against one another. What it buys back is what keeps this package's own license plain MIT — safe to run via a bare, unauthenticated `npx`, with no license terms to reason about beyond MIT's.
+It never imports `@templatical/core`, which is under [FSL-1.1-MIT](/license-faq) rather than plain MIT, like the editor and the media library. `edit` runs the operation engine from `@templatical/types`, which is MIT: the same engine the editor's collaboration and Templatical Cloud apply, kept identical to Cloud's by shared fixtures. That keeps this package's own license plain MIT — safe to run via a bare, unauthenticated `npx`, with no license terms to reason about beyond MIT's.
+
+`validate <file> --html --json` renders and compiles the email, reports `htmlBytes`, and adds `compat.gmail-clipping` if the compiled HTML exceeds the configured size. It requires the optional `mjml` peer; when absent, exit code `3` and the install hint arrive before any JSON output. `compat.*` findings are warning or info in template validation and never cause exit `1`. `custom-block validate` uses `compat.*` IDs for client facts instead of the old `safety.*` IDs; flex/grid, positioning, SVG, script, `@import`, and external stylesheets remain errors there, while `compat.html-style` is disabled. Issues carry `suggestion` and `reference`, and may include `clients` and `excerpt`.
 
 ---
 
@@ -1401,12 +1554,14 @@ See [Blocks Guide](/guide/blocks) for detailed descriptions of each block type.
 ```ts
 interface TitleBlock extends BaseBlock {
   type: 'title';
-  content: string;          // HTML content
-  level: 1 | 2 | 3 | 4;   // H1=36px, H2=28px, H3=22px, H4=18px
-  color: string;
+  content: string;
+  level: HeadingLevel;
+  color?: string;
   textAlign: 'left' | 'center' | 'right';
   fontFamily?: string;
 }
+
+type HeadingLevel = 1 | 2 | 3 | 4;
 ```
 
 ### ParagraphBlock
@@ -1414,7 +1569,8 @@ interface TitleBlock extends BaseBlock {
 ```ts
 interface ParagraphBlock extends BaseBlock {
   type: 'paragraph';
-  content: string;          // HTML content (all formatting is inline via TipTap)
+  content: string;
+  paragraphSpacing?: number;
 }
 ```
 
@@ -1472,12 +1628,20 @@ Container for multi-column layouts.
 interface SectionBlock extends BaseBlock {
   type: 'section';
   columns: ColumnLayout;
-  border?: BorderValue;     // absent: no border
-  backgroundImage?: BackgroundImage; // absent: no image; styles.backgroundColor is its fallback
-  hero?: SectionHero;       // absent: a regular section; applies with one column and an image
-  children: Block[][];      // Array of columns, each containing blocks
-  stackOnMobile?: boolean;  // absent/true: columns stack on mobile (MJML default).
-                            // false: rendered as <mj-group> so they stay side-by-side.
+  children: Block[][];
+  stackOnMobile?: boolean;
+  borderRadius?: BorderRadiusValue;
+  border?: BorderValue;
+  backgroundImage?: BackgroundImage;
+  hero?: SectionHero;
+  wrapper?: SectionWrapper;
+}
+
+interface SectionWrapper {
+  backgroundColor?: string;
+  padding?: SpacingValue;
+  borderRadius?: BorderRadiusValue;
+  backgroundImage?: BackgroundImage;
 }
 
 type ColumnLayout = '1' | '2' | '3' | '2-1' | '1-2';
@@ -1927,6 +2091,229 @@ unsubscribe(); // Remove listener
 
 `Template`, `TemplatePatch`, `SavedBlockInput`, `CommentsProvider`, `MediaProvider` and the rest of the BYO storage shapes live under [Connect your backend](/backend/). This page is the block model and editor config.
 
+## Operations and collaboration
+
+`Operation` and its six members, `BlockParent`, `OperationErrorCode`, `OperationError`, `applyOperations`, `applyOperationsInPlace` and `getColumnCount` are described in the [Operations reference](/api/operations). The collaboration contract — `CollaborationProvider`, `CollaborationHandlers`, `OperationBatch`, `RevisionedBatch`, `CollaborationActor`, `CollaborationMember`, `BlockLock`, `BlockLockHolder`, `CollaborationConflict` and `CollaborationRemoteChange` — is on [Collaboration](/backend/collaboration). `Template` carries `revision` and `locks` for a collaborating store.
+
+---
+
+# Collaboration
+
+Source: https://docs.templatical.com/backend/collaboration
+
+Give the editor a collaboration provider and several people can edit one template at once. Every edit reaches your backend as a batch of [operations](/api/operations), your backend puts the batches in one order, and every editor applies them in that order. Selecting a block locks it, so two people never type into the same block, and everyone sees who else has the template open.
+
+```ts
+import { init } from '@templatical/editor';
+
+let sessionId = '';
+
+const editor = await init({
+  container: '#editor',
+  user: { id: 'u_7', name: 'Ada Lovelace' },
+  templates: myTemplatesProvider, // `load` returns the template's `revision`
+  collaboration: {
+    join: (templateId, session, handlers) => {
+      sessionId = session.sessionId;
+      return myRealtime.join(templateId, session, handlers);
+    },
+    submit: (templateId, batch) =>
+      api(`/api/templates/${templateId}/operations`, {
+        method: 'POST',
+        headers: { 'X-Session-Id': sessionId },
+        body: JSON.stringify(batch),
+      }),
+    operationsAfter: (templateId, revision) =>
+      api(`/api/templates/${templateId}/operations?after=${revision}`, {
+        headers: { 'X-Session-Id': sessionId },
+      }),
+    acquireLock: (templateId, blockId) =>
+      api(`/api/templates/${templateId}/locks`, {
+        method: 'POST',
+        headers: { 'X-Session-Id': sessionId },
+        body: JSON.stringify({ blockId }),
+      }),
+    renewLock: (templateId, blockId) =>
+      api(`/api/templates/${templateId}/locks/${blockId}`, {
+        method: 'PUT',
+        headers: { 'X-Session-Id': sessionId },
+      }),
+    releaseLock: async (templateId, blockId) => {
+      await fetch(`/api/templates/${templateId}/locks/${blockId}`, {
+        method: 'DELETE',
+        headers: { 'X-Session-Id': sessionId },
+        keepalive: true,
+      });
+    },
+  },
+});
+
+await editor.load('tpl_123');
+```
+
+`api` is your own fetch helper; a refused request must reject with the HTTP status as `statusCode` and the response's `code`, `holder` and `holders` (see [Refusals](#refusals)), because a missing status counts as a network failure and is retried.
+
+The backend combines `X-Session-Id` with the authenticated user to identify the lock owner.
+
+## What the editor does
+
+- **Sends every edit as operations.** The editor compares the canvas with what it last sent and turns the difference into a batch: a drag becomes a `moveBlock`, typing an `updateBlock`. Typing into one block waits for a 300 ms pause, at most a second; everything else goes at once. One batch is in flight at a time, so a session's batches arrive in order, and a batch that fails in transit is sent again with the same `batchId`.
+- **Applies everyone's batches in revision order.** Batches from other sessions are buffered and applied strictly by revision, with this session's unconfirmed edits replayed on top. A gap that isn't filled within a second is fetched with `operationsAfter`.
+- **Locks the selected block.** Selecting a block takes its lock; another session's locked block shows its holder's name and colour and can't be selected. Locks renew every 10 seconds and are released on deselect, on loading another template and when the page closes.
+- **Shows who is here.** The header shows one avatar per person: a user's sessions in several tabs count once, and each guest counts on their own.
+- **Turns merge tags in arriving batches into tags.** A batch from another session — an agent's, another editor's, a server's — has the bare tokens in its titles and paragraphs converted as it arrives, the way [loaded content](/guide/merge-tags#tokens-in-loaded-content) is, and nothing is sent back for it. Arriving batches apply without their `expect`: your backend checked those against its own copy.
+- **Shows agents' edits.** A batch whose actor has `type: 'mcp'` shows a notice naming `actor.client` and `actor.name` ("Claude for Ada changed 3 blocks") and outlines the blocks it changed for 2 seconds. A re-sync whose `actor` has `type: 'mcp'` shows "Claude for Ada updated the template", with no outline. Batches and re-syncs from one agent within 2 seconds share a notice. Agents need no presence and take no locks.
+- **Undoes with operations.** Undo and redo send the inverse of your own batches, each guarded by what it expects to find. An undo that someone else's edit has overtaken is refused and skipped with a notice, never applied over their work. Other people's edits never enter your undo history.
+- **Saves only renames.** Content reaches your backend through `submit`, so `templates.save` receives only a new name, after the editor's batches are confirmed. Autosave keeps working: it settles the batches and renames if needed.
+- **Tells the user** when a selection or an edit was refused, when an undo step was skipped, when a version can't be restored because others hold locks, and while the connection is down.
+
+## The contract
+
+```ts
+import type {
+  CollaborationHandlers,
+  CollaborationProvider,
+} from '@templatical/types';
+
+interface CollaborationProvider {
+  join(
+    templateId: string,
+    session: { sessionId: string },
+    handlers: CollaborationHandlers,
+  ): Promise<{
+    revision: number;
+    locks: BlockLock[];
+    members: CollaborationMember[];
+    leave(): void;
+  }>;
+  submit(templateId: string, batch: OperationBatch): Promise<{ revision: number }>;
+  operationsAfter(
+    templateId: string,
+    revision: number,
+  ): Promise<
+    | { revision: number; batches: RevisionedBatch[] }
+    | { revision: number; resync: true }
+  >;
+  acquireLock?(templateId: string, blockId: string): Promise<BlockLock>;
+  renewLock?(templateId: string, blockId: string): Promise<BlockLock>;
+  releaseLock?(templateId: string, blockId: string): Promise<void>;
+}
+
+interface CollaborationHandlers {
+  onBatch(batch: RevisionedBatch): void;
+  onResync(revision: number, actor?: CollaborationActor): void;
+  onLock(lock: BlockLock): void;
+  onUnlock(blockId: string, sessionId: string): void;
+  onMembers(members: CollaborationMember[]): void;
+  onConnectionChange(state: 'connected' | 'reconnecting' | 'offline'): void;
+}
+```
+
+The shapes: `OperationBatch` is `{ batchId, baseRevision, ops }`; `RevisionedBatch` is `{ revision, batchId, actor, ops, createdAt? }`, where `actor` is `{ type: 'user' | 'guest' | 'mcp' | 'api', id, name, sessionId, client? }` and `client`, sent for `mcp` only, is the agent's name, which the editor renders as text; `CollaborationMember` is `{ sessionId, userId, name, type: 'user' | 'guest', avatarUrl?, color }`; `BlockLock` is `{ blockId, holder, expiresAt }`, where `holder` is `{ sessionId, type, id, name, color }`. All of them are exported from `@templatical/types`.
+
+### `join`
+
+Called when a template is loaded, with this editor's session id (a UUID the editor makes). Subscribe to the template's events, then answer with its current revision, the unexpired locks and everyone with it open, this session included. Call the handlers for everything that happens afterwards; `leave()` stops them.
+
+`join` is called again for the same template after a reconnect: answer with fresh state without subscribing twice. Call `onConnectionChange` when your realtime connection drops and comes back; the editor re-joins and catches up on `connected`.
+
+### `submit`
+
+Apply the batch's operations to the template, in order and all or nothing, then answer with the revision it produced. `baseRevision` is the last revision the editor had confirmed; batches are applied to the current content whatever it is, which is what the operations' sibling anchors and preconditions are for. A `batchId` you have already applied answers with that batch's revision and applies nothing, because the editor resends after a failure in transit. Send the batch to every other session with `onBatch`, with its revision and actor.
+
+### `operationsAfter`
+
+Answer with every batch after `revision`, in order. When you no longer have them all, answer `{ revision, resync: true }` and the editor reloads the template through `templates.load`. Call `onResync(revision, actor)` for a change batches can't describe, such as a `setContent`, a restored version or a broadcast too large for your transport. `actor` is who made the change, in the shape of a batch's; the editor uses it only for an agent's notice, and leaving it out changes nothing else.
+
+### Locks
+
+`acquireLock` grants the lock or refuses with `lock_held` and the holder; `renewLock` extends it or refuses with `lock_lost`; `releaseLock` lets it go and never fails. Send `onLock` and `onUnlock` to the other sessions. The three methods are optional together: without them the editor takes no locks.
+
+### Refusals
+
+The editor reads `statusCode` for retry classification, plus `code` and `holder` or `holders` for refusals. `CollaborationConflict` from `@templatical/types` carries them, and any error with the same fields works.
+
+| `code` | From | The editor |
+|---|---|---|
+| any of the [operation errors](/api/operations#errors) | `submit` | Drops the batch, puts back your backend's state and says the change wasn't saved, naming the holder for `lock_held` |
+| `content_too_large` | `submit` | Drops the batch and says the change was too large |
+| `lock_held` (with `holder`) | `acquireLock` | Deselects and says who is editing the block |
+| `lock_lost` | `renewLock` | Takes the lock again if the block is still selected |
+
+Network errors, 5xx, 408 and 429 are retried with the same `batchId` after 1, 2, 5, 10 and 30 seconds.
+
+## Templates
+
+With a collaboration provider, `templates.load` must return the template's `revision` along with its content, and may return its unexpired `locks`. `templates.save` receives only `{ name }`; the content is already on your backend. `create` works as usual and starts a template at revision 0.
+
+## Building a backend
+
+### Applying a batch
+
+```ts
+import { applyOperations, OperationError } from '@templatical/types';
+
+app.post('/api/templates/:id/operations', async (req, res) => {
+  const { batchId, ops } = req.body;
+  const sessionId = req.get('X-Session-Id') ?? null; // however you identify it
+  const template = await db.templates.lockForUpdate(req.params.id);
+
+  const known = await db.batches.find(template.id, batchId);
+  if (known) return res.json({ revision: known.revision });
+
+  const locks = await db.locks.unexpired(template.id);
+  let content;
+  try {
+    content = applyOperations(template.content, ops, {
+      locks: locks.map((lock) => ({ blockId: lock.blockId, sessionId: lock.owner })),
+      session: sessionId ? ownerOf(req.user, sessionId) : null,
+    });
+  } catch (error) {
+    if (!(error instanceof OperationError)) throw error;
+    return res.status(error.code === 'invalid_operation' ? 422 : 409).json({
+      message: error.message,
+      code: error.code,
+      opIndex: error.opIndex,
+    });
+  }
+
+  const revision = template.revision + 1;
+  await db.templates.update(template.id, { content, revision });
+  const batch = { revision, batchId, actor: actorOf(req.user, sessionId), ops };
+  await db.batches.insert(template.id, batch);
+  realtime.toOthers(template.id, sessionId, 'batch', batch);
+  res.json({ revision });
+});
+```
+
+Serialize the batches of one template: two applied at once would both read the same revision. Run the same `applyOperations` the editor runs, so a batch the editor considered valid is valid on your server too.
+
+### Locks and ownership
+
+A lock belongs to a session and to the identity behind it together: the user id, or `guest:<sessionId>` for a session without a user. Compare both, as `ownerOf` does above, so a session id borrowed from another user's request can't act on their lock. Give locks a short expiry (Templatical Cloud uses 30 seconds; the editor renews every 10), and when a session takes a new block, release the block it held before. Leave lock checks to `applyOperations`: pass every unexpired lock with its owner, and the acting owner as `session`.
+
+### Catching up
+
+Keep recent batches for `operationsAfter`. How many is up to you: when an editor asks for revisions you no longer have, answer `resync` and it reloads the template.
+
+### Presence
+
+Members are sessions, not users: the same user in two tabs is two members, and the editor groups them. Give each member a colour that stays the same for the same person everywhere, for example from a hash of the user id.
+
+## Without realtime
+
+A backend without a realtime channel can still collaborate in order: `join` answers with the revision and empty `locks` and `members` and never calls a handler, and the provider has no lock methods. Every edit still goes through `submit`, refusals still work, and other people's edits appear when the template is loaded again.
+
+## Events
+
+`init({ onRemoteChange })` is called with `{ actor, ops }` after another session's batch is applied on the canvas. It isn't called for this editor's own edits, nor for a re-sync that reloads the template.
+
+## In the playground
+
+The **Collaboration** setup runs this contract between browser tabs, over a backend built on `applyOperations` in a shared worker. Open it in two tabs, and add `?user=Ada` to one to sign it in.
+
+[Open in playground](https://play.templatical.com/scenes/collaboration)
+
 ---
 
 # Comments
@@ -2236,6 +2623,7 @@ Each key stands alone, and a feature is **absent until you pass its key**: no `v
 | [Saving & loading](/backend/templates) | inline name field, save button, save status, `Cmd`/`Ctrl`+`S`, autosave, unsaved-changes guard | `load` · `create` · `save` |
 | [Version history](/backend/version-history) | header control, version list, preview on the canvas with its own banner, restore with confirmation | `list` · `get` · `create` · `restore` |
 | [Comments](/backend/comments) | review panel, threads and replies, per-block count badges, resolve and reopen | `list` · `create` · `update` · `delete` · `setResolved` |
+| [Collaboration](/backend/collaboration) | others' edits live, a presence bar, block locks with outlines, undo that skips steps others overtook | `join` · `submit` · `operationsAfter` · and, together, `acquireLock` · `renewLock` · `releaseLock` |
 | [Saved blocks](/backend/saved-blocks) | pick session on the canvas, searchable browser with live preview, insert-at-position, rename, delete | `list` · `create` · `update` · `delete` |
 | [Media](/backend/media) | Browse on image fields, drop-to-upload, crop, folders, search | `list` · `create` · `update` · `delete` · `folders` · `replace` · `importFromUrl` · `checkUsage` · `frequentlyUsed` · `storage` |
 | [Test emails](/backend/test-email) | header trigger, recipient control, shape validation, accurate preview, sending and error states | `send` |
@@ -2243,7 +2631,7 @@ Each key stands alone, and a feature is **absent until you pass its key**: no `v
 
 The editor keeps what is fiddly and the same for everybody: dirty tracking, a debounced autosave that pauses during undo, a preview that honours display conditions, the confirmation before a restore discards unsaved work. You keep where the bytes go, who may read them, and what your API looks like.
 
-On `templates`, `versionHistory`, `comments`, `savedBlocks` and `media` every mutation is `false | fn`. Passing `false` states that the action is unavailable: calling it rejects, and wherever the editor renders a control for it, that control is hidden rather than disabled. Each provider page covers its own — [saved blocks](/backend/saved-blocks#controlling-permissions) and [media](/backend/media#controlling-permissions) have the fullest treatment. `render` and `testEmail` are shaped differently: every `render` method is independently optional, and `testEmail` is a single `send`.
+On `templates`, `versionHistory`, `comments`, `savedBlocks` and `media` every mutation is `false | fn`. Passing `false` states that the action is unavailable: calling it rejects, and wherever the editor renders a control for it, that control is hidden rather than disabled. Each provider page covers its own — [saved blocks](/backend/saved-blocks#controlling-permissions) and [media](/backend/media#controlling-permissions) have the fullest treatment. `render` and `testEmail` are shaped differently: every `render` method is independently optional, and `testEmail` is a single `send`. `collaboration` is a session rather than storage: it needs `templates`, and its three lock methods are optional together.
 
 ::: warning Not a security boundary
 Providers run in the user's browser. These flags shape the UI; they do not protect your API. Who may open a template, who may delete a shared saved block, which address a test may reach — enforce all of it on your server as well.
@@ -2947,6 +3335,8 @@ The **Render** setup runs `editor.toMjml()` in the browser and `toHtml()` throug
 - [`@templatical/renderer` API](/api/renderer-typescript)
 - [Saving & Loading](/backend/templates) — the save/load lifecycle, separate from this
 - [Custom Blocks](/guide/custom-blocks) — why pre-rendering is part of the payload
+
+The editor’s Issues panel shows an **Email size** section with a **Check size** button when the render provider implements `toHtml` or `compileMjml`. The check renders only on demand and never calls a save endpoint. The result stays visible after an edit, marked out of date until **Check again** runs.
 
 ---
 
@@ -5835,7 +6225,7 @@ Templatical separates template editing from template rendering. The editor produ
 
 ## MJML
 
-[MJML](https://mjml.io) is an open-source markup language designed specifically for email. Email HTML is notoriously difficult. Every email client renders HTML differently -- Outlook uses Microsoft Word's rendering engine, Gmail strips `<style>` tags, Apple Mail supports modern CSS but Yahoo doesn't. Writing HTML that works everywhere requires:
+[MJML](https://mjml.io) is an open-source markup language designed specifically for email. Email HTML is notoriously difficult. Email clients render HTML differently -- Outlook uses Microsoft Word's rendering engine, Gmail supports `<style>` in the head but only partly in the body ([caniemail](https://www.caniemail.com/features/html-style/)), Apple Mail supports modern CSS but Yahoo doesn't. Writing HTML that works everywhere requires:
 
 - Nested tables for layout (flexbox and grid don't work)
 - Inline styles on every element (external/embedded stylesheets are stripped)
@@ -5998,7 +6388,7 @@ If you call `editor.toMjml()` without the renderer installed, it throws a clear 
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `@templatical/editor`          | Visual drag-and-drop editor and `init()` entry point. Self-contained — Vue, TipTap, and `@templatical/core`/`/types` are bundled inside. | Required                                                                                            |
 | `@templatical/renderer`        | Converts templates to MJML for email sending.                                                                                            | Optional — install where you call `editor.toMjml()` (browser) or `renderToMjml()` (Node.js, server) |
-| `@templatical/quality`         | Template linters (accessibility, structure, links) that drive the editor's Issues panel and a headless / CI check.                             | Optional — install to turn on the Issues sidebar tab and inline block badges                        |
+| `@templatical/quality`         | Template linters (accessibility, structure, links, deliverability, compatibility) that drive the editor's Issues panel and a headless / CI check.                             | Optional — install to turn on the Issues sidebar tab and inline block badges                        |
 | `@templatical/media-library`   | Standalone media SDK (`init()`, `useMediaLibrary`, `MediaLibraryModal` in a Vue app). The editor's Browse UI is bundled into `@templatical/editor`. | Optional — only for standalone use, not for `init({ media })` or Cloud's store |
 | `@templatical/types`           | Shared TypeScript types, block factory functions, type guards.                                                                           | Only if you build templates programmatically without the editor (e.g. server-side workflows)        |
 | `@templatical/core`            | Framework-agnostic editor logic (state, history) for headless setups.                                                                    | Only for headless / non-editor consumers                                                            |
@@ -6021,7 +6411,7 @@ The editor lazy-loads three optional peers via dynamic `import()` at runtime, ga
 | Peer                         | When loaded                     | Install if you                    |
 | ---------------------------- | ------------------------------- | --------------------------------- |
 | `@templatical/renderer`      | First call to `editor.toMjml()` | Need MJML export from the browser |
-| `@templatical/quality`       | Editor mount (Issues panel)     | Want accessibility, structure, and link lint in the Issues sidebar |
+| `@templatical/quality`       | Editor mount (Issues panel)     | Want accessibility, structure, link, deliverability, and compatibility lint in the Issues sidebar |
 | `pusher-js`                  | Cloud realtime connect          | Use `initCloud()`                 |
 
 If you don't install them, the editor still mounts. Quality's Issues tab and Pusher stay off. `editor.toMjml()` throws a clear error naming the missing package. Browse needs no extra package — the modal is a lazy chunk of the editor.
@@ -6800,7 +7190,7 @@ To create blocks programmatically, see [Programmatic Templates](/guide/programma
 | Headings, titles | [Title](#title) | Fixed-size headings (H1-H4) with block-level formatting |
 | Body text, paragraphs | [Paragraph](#paragraph) | Rich text with inline formatting via TipTap |
 | Photos, banners, logos | [Image](#image) | Optional link wrapping, responsive width |
-| Call-to-action | [Button](#button) | Bulletproof buttons that work in all email clients |
+| Call-to-action | [Button](#button) | Bulletproof buttons rendered through `mj-button` as HTML tables |
 | Multi-column layout | [Section](#section) | The only block that holds other blocks |
 | Visual separation | [Divider](#divider) | Horizontal line with style options |
 | Vertical spacing | [Spacer](#spacer) | Empty space between blocks |
@@ -6895,6 +7285,8 @@ Empty vertical space.
 
 Injects raw HTML into the template. Use this for content that cannot be expressed with other block types.
 
+HTML block content passes through MJML without making it email-safe. Check client support on [caniemail](https://www.caniemail.com/) and run the [compatibility linter](/quality/compatibility/) for common failures, including inline SVG, forms and unsupported CSS.
+
 The editor and the renderer output this markup unchanged; neither sanitizes it. If the HTML can come from untrusted sources, sanitize `content` on your server before saving or sending. To leave HTML blocks out of the rendered email entirely, pass [`allowHtmlBlocks: false`](/api/renderer-typescript) to `renderToMjml`.
 
 | Property | Type | Description |
@@ -6976,6 +7368,8 @@ A data table with optional header row styling.
 | `textAlign` | `'left' \| 'center' \| 'right'` | Cell text alignment |
 
 ## Video
+
+Video blocks use a linked thumbnail rather than an embedded `<video>`; see [caniemail video support](https://www.caniemail.com/features/html-video/).
 
 Displays a video thumbnail that links to the video URL.
 
@@ -7712,6 +8106,8 @@ The **Custom blocks** setup registers one block type, which appears on the palet
 
 The [Agent Skill](/guide/agent-skill) defines a custom block from a description, previews it live and writes it into your codebase.
 
+Custom block templates and stylesheets pass through the renderer. Check their HTML and CSS with `custom-block validate` and the [compatibility catalog](/quality/compatibility/rule-catalog); [caniemail](https://www.caniemail.com/) supplies the client-support facts.
+
 ---
 
 # Block & Template Defaults
@@ -7899,7 +8295,7 @@ import {
 
 // Inspect the defaults for a single block type
 console.log(TITLE_BLOCK_DEFAULTS);
-// { content: '<p>Enter your title</p>', level: 2, color: '#1a1a1a', ... }
+// { content: '<p>Enter your title</p>', level: 2, textAlign: 'left' }
 
 // Inspect template defaults
 console.log(DEFAULT_TEMPLATE_DEFAULTS);
@@ -7913,6 +8309,8 @@ const myButtonDefaults = {
   borderRadius: 8,
 };
 ```
+
+A new title inherits the document's `textColor`; `TITLE_BLOCK_DEFAULTS` does not set `color`.
 
 ### Available Constants
 
@@ -7938,7 +8336,7 @@ const myButtonDefaults = {
 | Constant | Description |
 |----------|-------------|
 | `DEFAULT_BLOCK_DEFAULTS` | All block type defaults in a single object (keys match `BlockDefaults` interface) |
-| `DEFAULT_TEMPLATE_DEFAULTS` | Template settings defaults (`width`, `backgroundColor`, `fontFamily`) |
+| `DEFAULT_TEMPLATE_DEFAULTS` | Template settings defaults (`width`, `backgroundColor`, `textColor`, `linkUnderline`, `fontFamily`, `locale`) |
 
 These constants are the single source of truth used internally by the factory functions. If you only need to override a few properties, you don't need to reference them — just pass your overrides to `blockDefaults` and they'll be deep-merged with these values.
 
@@ -8276,7 +8674,7 @@ If you exclude the family that new templates start on — Arial by default, or w
 - **Always set a fallback** — Most email clients don't support custom fonts. The fallback stack ensures your email still looks good when the custom font doesn't load.
 - **Limit font weights** — Only include the weights you actually need (e.g., `wght@400;700`). Extra weights increase load time for recipients.
 - **Stick to 1-2 custom fonts** — Too many fonts slow down rendering and make the design inconsistent. One for headings and one for body text is a common pattern.
-- **Test across clients** — Gmail, Outlook, and Apple Mail all handle fonts differently. Gmail supports Google Fonts in most cases, but Outlook falls back to system fonts.
+- **Test across clients** — Gmail, Outlook, and Apple Mail all handle fonts differently. [caniemail reports no `@font-face` support in Gmail](https://www.caniemail.com/features/css-at-font-face/), and Outlook also falls back to system fonts.
 
 ---
 
@@ -8473,7 +8871,7 @@ export default translations;
 
 ### Cloud strings are optional
 
-Translations are split into two chunks. The main chunk (`locales/*.ts`) covers everything `init()` renders. A separate cloud chunk (`locales/cloud/*.ts`) covers features only available via `initCloud()` — AI, collaboration, template scoring, the lint save gate, and plan limits. You don't need to translate the cloud chunk: if `locales/cloud/<locale>.ts` doesn't exist, cloud features fall back to English while the rest of the editor renders in your language.
+Translations are split into two chunks. The main chunk (`locales/*.ts`) covers everything `init()` renders. A separate cloud chunk (`locales/cloud/*.ts`) covers features only available via `initCloud()` — AI, template scoring, the lint save gate, and plan limits. You don't need to translate the cloud chunk: if `locales/cloud/<locale>.ts` doesn't exist, cloud features fall back to English while the rest of the editor renders in your language.
 
 Submit a pull request with your translation file. Contributions for any language are welcome.
 
@@ -8568,7 +8966,7 @@ A few notes:
 - **One file per drop.** `files` is an array for forward-compatibility, but the editor currently sends a single file (`files[0]`).
 - **Images only.** The editor pre-filters dropped files to image MIME types before calling you.
 - **No picker, no drop.** Without `onRequestMedia` and without a `media` provider whose `create` is a function, the drop affordance doesn't appear and drops are ignored.
-- **Don't return a `blob:` URL.** `URL.createObjectURL(file)` is session-local and breaks export. Upload the file and return a durable URL (or a `data:` URL).
+- **Don't return a `blob:` URL.** `URL.createObjectURL(file)` is session-local and breaks export. Upload the file and return a durable URL. [Base64 images fail in Gmail](https://www.caniemail.com/features/image-base64/).
 
 With a `media` provider whose `create` is a function, dropped files upload through that provider — no `onRequestMedia` needed. A custom handler still takes precedence.
 
@@ -8658,7 +9056,7 @@ When a section's columns stack on a phone, each column there is wider than on de
 
 To render a **circular** avatar or portrait, give the block a square source image and a radius of at least half its rendered size: a 240px square needs `120`, and any larger value (`999` is the usual shorthand) resolves to the same circle. A non-square image rounds to an ellipse, since there is no cropping step -- see Height above for why.
 
-Support is good but not universal. Apple Mail, iOS Mail, Gmail and Outlook.com honour it; Outlook on Windows ignores it and shows square corners. Treat it as a progressive enhancement rather than something a layout depends on.
+Support is good but not universal. Apple Mail, iOS Mail, Gmail and Outlook.com honour it; Outlook on Windows ignores it and shows square corners. Treat it as a progressive enhancement rather than something a layout depends on. See [caniemail border-radius support](https://www.caniemail.com/features/css-border-radius/).
 
 ### Placeholder URL
 
@@ -9402,6 +9800,7 @@ There is nothing to call and nothing to enable. It runs wherever content arrives
 | `editor.create({ content })` | before the content becomes editor state |
 | `editor.load(id)` | as the [`templates`](/backend/templates) provider's result returns |
 | [Version history](/backend/version-history) preview and restore | as each version reaches the canvas |
+| Batches from other sessions with [collaboration](/backend/collaboration), an AI agent's included | as each batch is applied |
 
 Matching follows your configured `syntax`, not the `tags` array, so an undeclared token still becomes a tag — labelled with its own raw value.
 
@@ -10433,6 +10832,8 @@ A wrapper the importer descends through contributes no entry of its own: nothing
 ::: warning Entry counts changed
 Sections and lost layouts are reported where they previously were not, so `report.summary.total` is higher for the same document, and `approximated` now covers cases that raised only a `warnings` string or went unreported. Code that asserts on exact totals needs updating; code that filters by `status` or `templaticalBlockType` does not.
 :::
+
+HTML fallback blocks remain pass-through content. Check their client support with the [compatibility linter](/quality/compatibility/) and [caniemail](https://www.caniemail.com/) after import.
 
 ---
 
@@ -12273,6 +12674,9 @@ const editor = await init({
     settings: {
       width: 640,
       backgroundColor: '#f8fafc',
+      textColor: '#1a1a1a',
+      linkUnderline: true,
+      locale: 'en',
       fontFamily: 'Inter, system-ui, sans-serif',
     },
     blocks: [],
@@ -12740,7 +13144,7 @@ There is no header logo or other forced branding — the footer is the only attr
 
 **No.** The Cloud tier is optional. The SDK works standalone — every feature `init()` offers in `@templatical/editor` runs without any backend.
 
-Cloud is optional hosted infrastructure (AI rewrite, real-time collaboration, managed storage). Comments, saved blocks, version history, test email, and media are available on `init()` via providers you implement — Cloud is one adapter, not the feature.
+Cloud is optional hosted infrastructure (AI rewrite, real-time collaboration, managed storage). Comments, saved blocks, version history, test email, media, and real-time collaboration are available on `init()` via providers you implement — Cloud is one adapter, not the feature.
 
 ## What if I have a question this doesn't answer?
 
@@ -12779,7 +13183,7 @@ const issues = lintAccessibility(content); // options is an optional second argu
 // issues: LintIssue[] — each entry has ruleId starting with "a11y."
 ```
 
-The function takes a `TemplateContent` and an optional [`LintOptions`](../options) object. It returns a flat array of `LintIssue` objects with `ruleId`, `severity`, `message`, `blockId`, and optionally a `fix` patch.
+The function takes a `TemplateContent` and an optional [`LintOptions`](../options) object. It returns a flat array of `LintIssue` objects with `ruleId`, `severity`, `message`, `blockId`, required `suggestion` and `reference`, and optionally a `fix` patch.
 
 Accessibility-specific config lives under `LintOptions.accessibility`. Set `accessibility: false` to disable the linter entirely.
 
@@ -12797,7 +13201,7 @@ In the editor, the `useTemplateLint` composable lazy-imports `@templatical/quali
 ## Quick links
 
 - [Rule catalog](./rule-catalog) — every accessibility rule with severity, rationale, and examples.
-- [Options](../options) — shared across both linters.
+- [Options](../options) — shared across all five linters.
 - [Severity & fixes](../severity-and-fixes) — how the severity model works and how auto-fix patches are applied.
 - [Headless usage](../headless-usage) — validating stored templates in CI.
 - [Contributing locales](../contributing-locales) — adding rule messages + vague-text dictionaries.
@@ -12863,6 +13267,315 @@ The 21 rules `lintAccessibility` ships, grouped by what they check. Each rule li
 
 ---
 
+# Compatibility linter
+
+Source: https://docs.templatical.com/quality/compatibility/
+
+`lintCompatibility(content, options?)` flags client-breaking HTML and CSS in authored pass-through content. These rules flag HTML and CSS that the renderer passes through unchanged and that major email clients don't support, using data from caniemail.com. The renderer's own output is MJML's job and isn't checked.
+
+The bundled [caniemail snapshot](https://www.caniemail.com/) was updated **2026-09-16**. Support verdicts use the last-listed test for each client platform. A warning means at least one listed client cannot use the detected feature; info means only partial support remains. The [rule catalog](./rule-catalog) gives triggers, exceptions, and sources. `<script>` and `<iframe>` warnings are hand-written because caniemail has no tests for them.
+
+## What is scanned
+
+The linter reads authored `html`, paragraph and title content, table-cell content, and custom blocks' `renderedHtml` and `renderedStylesheet`. It also checks image `src`, video `thumbnailUrl`, and section, section-wrapper and wrapper-block background image URLs for base64 images. CSS inside style attributes, `<style>` elements and custom stylesheets is included. One issue per rule and block carries a `suggestion`, `reference`, and, for data-backed findings, affected `clients` and a short `excerpt`.
+
+It does not inspect MJML's generated output. The Outlook background checks in `structure.*` remain structure rules because they concern SDK layout fields. Linked SVG, WebP and AVIF images are left to the existing image guidance; their rendering depends on the image host and client.
+
+## API and options
+
+```ts
+import { readFile } from "node:fs/promises";
+import { lintCompatibility, lintHtmlFragment } from "@templatical/quality";
+
+const content = JSON.parse(await readFile("template.json", "utf8"));
+const issues = lintCompatibility(content);
+const fragmentIssues = lintHtmlFragment('<div style="display:flex">Hi</div>', {
+  stylesheet: ".card { position: absolute }",
+  locale: "en",
+});
+```
+
+`lintTemplate` runs compatibility last, after accessibility, structure, links and deliverability. Set `compatibility: false` to disable the category, or set a rule to `"off"` in `compatibility.rules`. `compatibility.thresholds.maxHtmlBytes` defaults to `92_160` bytes (90 KiB). Every category must be `false` to prevent the editor's optional quality chunk from loading.
+
+`lintCompiledHtml(html, options?)` measures UTF-8 bytes and flags `compat.gmail-clipping` only when the compiled HTML exceeds that threshold. Google does not publish a clipping threshold; community tests in [email-bugs#41](https://github.com/hteumeuleu/email-bugs/issues/41) show Gmail clipping at **about 102 KB**, and sometimes earlier once a sending service adds its markup. The default margin allows for tracking links added by sending services. Quality never renders or compiles HTML itself:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { renderToMjml } from "@templatical/renderer";
+import { lintCompiledHtml } from "@templatical/quality";
+import mjml2html from "mjml";
+
+const content = JSON.parse(await readFile("template.json", "utf8"));
+const mjml = await renderToMjml(content);
+const html = (await mjml2html(mjml, { validationLevel: "soft" })).html;
+const sizeIssues = lintCompiledHtml(html);
+```
+
+Install `mjml` separately for this example. In the editor, the Issues panel shows an **Email size** section when its render provider implements `toHtml` or `compileMjml`. It explains that Gmail cuts off emails over about 102 KB. Choose **Check size** to measure the compiled HTML. A passing result shows the size and confirms Gmail will show the whole email; an oversized result shows the size and a clipping warning in the issues list. After an edit, the last size remains visible with an out-of-date message and the button changes to **Check again**. Cloud mode does not show this section because its current HTML render path saves first.
+
+## Check it
+
+Save this template as `template.json`:
+
+```json
+{"blocks":[{"id":"html_1","type":"html","content":"<svg width=\"40\" height=\"40\"><circle cx=\"20\" cy=\"20\" r=\"18\"/></svg>","styles":{"padding":{"top":10,"right":10,"bottom":10,"left":10}}}],"settings":{"width":600,"backgroundColor":"#ffffff","textColor":"#1a1a1a","linkUnderline":true,"fontFamily":"Arial","locale":"en"}}
+```
+
+```bash
+npx @templatical/template-tools validate template.json --html --json
+```
+
+With the optional `mjml` package installed, the built CLI exits `0` and reports `htmlBytes: 4181`. Its output includes this issue (selected fields from the actual result):
+
+```json
+{"blockId":"html_1","ruleId":"compat.html-svg","severity":"warning","suggestion":"Use a PNG or JPEG image instead.","reference":"https://www.caniemail.com/features/html-svg/","excerpt":"<svg>"}
+```
+
+`--html` compiles once; without `mjml`, it exits `3` with the install hint before producing output. Compatibility warnings and info never make a structurally valid template exit `1`.
+
+---
+
+# Compatibility rule catalog
+
+Source: https://docs.templatical.com/quality/compatibility/rule-catalog
+
+This catalog explains every `compat.*` rule, its trigger, exclusions, severity and evidence. Data-backed rules use the bundled caniemail snapshot dated 2026-09-16. A client verdict is its last-listed test, with the noted usage narrowed where specified.
+
+
+## `compat.css-display-flex` {#compat-css-display-flex}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** `display: flex` or `inline-flex` in pass-through CSS.
+
+**What does not:** Other display values and SDK column layout.
+
+**Narrowing:** Note 2 makes `inline-flex` unsupported where that variant is excluded.
+
+**Source:** [caniemail css-display-flex](https://www.caniemail.com/features/css-display-flex/).
+
+## `compat.css-display-grid` {#compat-css-display-grid}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** `display: grid` or `inline-grid` in pass-through CSS.
+
+**What does not:** Other display values and SDK column layout.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail css-display-grid](https://www.caniemail.com/features/css-display-grid/).
+
+## `compat.css-position` {#compat-css-position}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** `position: absolute`, `fixed` or `sticky` in pass-through CSS.
+
+**What does not:** `position: relative`.
+
+**Narrowing:** Notes 1–4 name supported values; any detected value outside a cell’s list is unsupported.
+
+**Source:** [caniemail css-position](https://www.caniemail.com/features/css-position/).
+
+## `compat.css-variables` {#compat-css-variables}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A `var(--…)` reference in a CSS value.
+
+**What does not:** Declarations without a variable reference.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail css-variables](https://www.caniemail.com/features/css-variables/).
+
+## `compat.css-at-import` {#compat-css-at-import}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** An `@import` rule in a style element or stylesheet.
+
+**What does not:** Text inside CSS comments.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail css-at-import](https://www.caniemail.com/features/css-at-import/).
+
+## `compat.html-link` {#compat-html-link}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A `<link>` whose `rel` contains `stylesheet`.
+
+**What does not:** Other `rel` values.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail html-link](https://www.caniemail.com/features/html-link/).
+
+## `compat.html-style` {#compat-html-style}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A `<style>` element in pass-through HTML, which lands in the email body.
+
+**What does not:** Styles generated in MJML’s head.
+
+**Narrowing:** Note 1 excludes `<style>` in `<body>` even when the client supports it in the head.
+
+**Source:** [caniemail html-style](https://www.caniemail.com/features/html-style/).
+
+## `compat.html-svg` {#compat-html-svg}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** An inline `<svg>` element.
+
+**What does not:** A linked SVG image URL; this rule reads elements, not linked image formats.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail html-svg](https://www.caniemail.com/features/html-svg/).
+
+## `compat.html-form` {#compat-html-form}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A `<form>`, `<input>`, `<select>` or `<textarea>` element.
+
+**What does not:** A link to a web form.
+
+**Narrowing:** Gmail web supports forms; Outlook Windows does not. The rule follows the client cells rather than a blanket claim.
+
+**Source:** [caniemail html-form](https://www.caniemail.com/features/html-form/).
+
+## `compat.html-object` {#compat-html-object}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** An `<object>` element.
+
+**What does not:** A linked image.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail html-object](https://www.caniemail.com/features/html-object/).
+
+## `compat.html-video` {#compat-html-video}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** An embedded `<video>` element.
+
+**What does not:** The SDK Video block, which emits a linked thumbnail.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail html-video](https://www.caniemail.com/features/html-video/).
+
+## `compat.html-audio` {#compat-html-audio}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** An embedded `<audio>` element.
+
+**What does not:** A link to an audio file.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail html-audio](https://www.caniemail.com/features/html-audio/).
+
+## `compat.css-width` {#compat-css-width}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** Inline `width` on `div`, `p`, `span` or `body`, or on `img` without a width attribute.
+
+**What does not:** A table cell width or an image with a width attribute.
+
+**Narrowing:** Note 1 excludes these elements in affected clients.
+
+**Source:** [caniemail css-width](https://www.caniemail.com/features/css-width/).
+
+## `compat.css-max-width` {#compat-css-max-width}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** Inline `max-width` on an element other than `table`.
+
+**What does not:** `max-width` on a table.
+
+**Narrowing:** Note 1 permits only tables in affected clients.
+
+**Source:** [caniemail css-max-width](https://www.caniemail.com/features/css-max-width/).
+
+## `compat.css-float` {#compat-css-float}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A `float` declaration in an inline style or stylesheet.
+
+**What does not:** Layout produced from SDK sections and columns.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail css-float](https://www.caniemail.com/features/css-float/).
+
+## `compat.css-background-image` {#compat-css-background-image}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A CSS background URL without `background-color`, a color in the `background` shorthand, or `bgcolor`.
+
+**What does not:** A background with one of those fallback colors.
+
+**Narrowing:** No note narrowing.
+
+**Source:** [caniemail css-background-image](https://www.caniemail.com/features/css-background-image/).
+
+## `compat.image-base64` {#compat-image-base64}
+
+**Default severity:** `warning` when any client is unsupported; `info` when only partial.
+
+**What fires:** A `data:image/` URL in a pass-through image, background attribute, CSS URL or supported block URL field.
+
+**What does not:** Hosted image URLs and non-image data URLs. The excerpt contains only the media type.
+
+**Narrowing:** Note 1 excludes GIF; note 3 supports only PNG.
+
+**Source:** [caniemail image-base64](https://www.caniemail.com/features/image-base64/).
+
+## `compat.html-script` {#compat-html-script}
+
+**Default severity:** `warning`.
+
+**What fires:** A `<script>` element. Email clients do not run its JavaScript.
+
+**Evidence:** Hand-written warning; caniemail has no test for this element.
+
+## `compat.html-iframe` {#compat-html-iframe}
+
+**Default severity:** `warning`.
+
+**What fires:** An `<iframe>` element whose embedded content is blocked in most email clients.
+
+**Evidence:** Hand-written warning; caniemail has no test for this element.
+
+## `compat.gmail-clipping` {#compat-gmail-clipping}
+
+**Default severity:** `warning`.
+
+**What fires:** Compiled HTML larger than `thresholds.maxHtmlBytes` (default `92_160` UTF-8 bytes); equality passes.
+
+**Where it runs:** Never in `lintTemplate` or the editor's live Issues list. Three surfaces measure it: `lintCompiledHtml(html)` on HTML you compile; `templatical validate --html`, which needs the optional `mjml` peer (exit 3 without it); and the editor's **Email size** check, shown only when the [render provider](/backend/render) implements `toHtml` or `compileMjml`, and not in Cloud mode.
+
+**Evidence:** Only `lintCompiledHtml` checks this; template JSON and pass-through scans do not estimate compiled size. Google does not document the approximately 102 KB limit; it comes from community tests, which also show clipping below it after a sending service adds markup.
+
+[email-bugs#41: Gmail clips emails at 102 kB](https://github.com/hteumeuleu/email-bugs/issues/41).
+
+---
+
 # Contributing locales
 
 Source: https://docs.templatical.com/quality/contributing-locales
@@ -12873,8 +13586,11 @@ Source: https://docs.templatical.com/quality/contributing-locales
 2. **Vague-text dictionaries** (`src/accessibility/dictionaries/{locale}.ts`) — phrase lists used by `a11y.link-vague-text`, `a11y.button-vague-label`, and `a11y.img-linked-no-context`.
 3. **Structure rule messages** (`src/structure/messages/{locale}.ts`) — strings for each `structure.*` issue.
 4. **Link rule messages** (`src/links/messages/{locale}.ts`) — strings for each `link.*` issue.
+5. **Deliverability rule messages** (`src/deliverability/messages/{locale}.ts`) — strings for each `deliverability.*` issue.
 
-Each set mirrors the editor's locale set. The structure and link linters have no equivalent of vague-text dictionaries — their rules are deterministic and locale-agnostic, only the message text needs translating.
+6. **Compatibility rule messages** (`src/compatibility/messages/{locale}.ts`) — `message` and `suggestion` for each `compat.*` rule, plus client grouping labels.
+
+Each set mirrors the editor's locale set. The structure, link, and deliverability linters have no equivalent of vague-text dictionaries — their rules are deterministic and locale-agnostic, only the message text needs translating.
 
 ## File layout
 
@@ -12898,17 +13614,27 @@ packages/quality/src/links/messages/
   en.ts       ← source of truth
   de.ts       ← annotated `typeof en`
   index.ts    ← exports formatLinkMessage(), getLinkMessages()
+
+packages/quality/src/compatibility/messages/
+  en.ts
+  de.ts
+  index.ts
+
+packages/quality/src/deliverability/messages/
+  en.ts       ← source of truth
+  de.ts       ← annotated `typeof en`
+  index.ts    ← exports formatDeliverabilityMessage(), getDeliverabilityMessages()
 ```
 
 ## Adding a locale
 
-You need **three** files (or two if you're skipping the vague-text dictionary): a message map per linter and a dictionary. Drop the files and they're picked up automatically — every locale registry is built at compile time via `import.meta.glob`, so there's no map to update.
+You need one message file per linter and optionally a vague-text dictionary. Drop the files and they're picked up automatically — every locale registry is built at compile time via `import.meta.glob`, so there's no map to update.
 
 Follow the `typeof en` pattern for every file. The annotation is the contract: any missing key, extra key, or wrong type fails `pnpm run typecheck`. Runtime parity tests verify `{name}` placeholder positions match across locales.
 
 ### 1. Accessibility rule messages
 
-Drop `accessibility/messages/<lang>.ts` and translate every value, preserving `{name}` placeholders exactly:
+Drop `accessibility/messages/<lang>.ts` and translate both `message` and `suggestion` for every value, preserving `{name}` placeholders exactly:
 
 ```ts
 // accessibility/messages/pt.ts
@@ -12916,9 +13642,9 @@ import type en from "./en";
 
 const pt: typeof en = {
   "a11y.img-missing-alt":
-    "Imagem sem texto alternativo. Adicione uma descrição curta ou marque a imagem como decorativa.",
+    { message: "Imagem sem texto alternativo.", suggestion: "Adicione uma descrição curta ou marque a imagem como decorativa." },
   "a11y.img-alt-too-long":
-    "Texto alternativo tem {length} caracteres; mantenha abaixo de {max}.",
+    { message: "Texto alternativo tem {length} caracteres.", suggestion: "Mantenha abaixo de {max}." },
   // …one key per accessibility rule
 };
 
@@ -12952,9 +13678,9 @@ import type en from "./en";
 
 const pt: typeof en = {
   "structure.duplicate-block-id":
-    "ID de bloco aparece {count} vezes na árvore. Cada bloco precisa ter um ID único.",
+    { message: "ID de bloco aparece {count} vezes na árvore.", suggestion: "Dê a cada bloco um ID único." },
   "structure.section-column-mismatch":
-    'Seção usa layout "{layout}" (espera {expected} colunas) mas tem {actual}. Estado corrompido.',
+    { message: "Seção usa layout {layout}: esperadas {expected} colunas, encontradas {actual}.", suggestion: "Corrija as colunas." },
   // …one key per structure rule
 };
 
@@ -12971,16 +13697,32 @@ import type en from "./en";
 
 const pt: typeof en = {
   "link.javascript-protocol":
-    'URL usa o protocolo "javascript:", que é removido na renderização por segurança. Substitua por um link real ou remova a URL.',
+    { message: "URL usa o protocolo javascript:.", suggestion: "Substitua por um link real ou remova a URL." },
   "link.unsupported-protocol":
-    'URL usa o protocolo "{protocol}", que a maioria dos clientes de e-mail não suporta. Use http, https, mailto, tel ou sms.',
+    { message: "URL usa o protocolo {protocol}, que muitos clientes não suportam.", suggestion: "Use http, https, mailto, tel ou sms." },
   // …one key per link rule
 };
 
 export default pt;
 ```
 
-That's it — `SUPPORTED_MESSAGE_LOCALES`, `SUPPORTED_DICTIONARY_LOCALES`, `SUPPORTED_STRUCTURE_MESSAGE_LOCALES`, and `SUPPORTED_LINK_MESSAGE_LOCALES` reflect the new locale automatically. No registry edit, no test update.
+### 5. Deliverability rule messages
+
+Add `deliverability/messages/<lang>.ts` and translate every key in `en.ts`. Preserve the `{textHost}`, `{linkHost}`, `{host}`, `{count}`, and `{min}` placeholders.
+
+```ts
+import en from "./en";
+
+const pt: typeof en = {
+  ...en,
+  "deliverability.link-text-domain-mismatch":
+    { message: "O texto mostra {textHost}, mas o link leva a {linkHost}.", suggestion: "Alinhe o texto com o destino." },
+};
+
+export default pt;
+```
+
+That's it — `SUPPORTED_MESSAGE_LOCALES`, `SUPPORTED_DICTIONARY_LOCALES`, `SUPPORTED_STRUCTURE_MESSAGE_LOCALES`, `SUPPORTED_LINK_MESSAGE_LOCALES`, and `SUPPORTED_DELIVERABILITY_MESSAGE_LOCALES` reflect the new locale automatically. No registry edit, no test update.
 
 ## Phrase guidelines (vague-text dictionary)
 
@@ -12994,7 +13736,126 @@ That's it — `SUPPORTED_MESSAGE_LOCALES`, `SUPPORTED_DICTIONARY_LOCALES`, `SUPP
 ## Match order
 
 - **Vague-text dictionary** — `getDictionary(locale)` returns a union of every registered locale's phrases (and action hints). The `locale` argument is accepted for API symmetry but currently doesn't change the returned set; a vague phrase is universally vague, and an action verb in any registered language counts as link-destination context, so detection is cross-locale by design.
-- **Rule messages** — `formatMessage(locale, ruleId, params?)` (accessibility), `formatStructureMessage(locale, ruleId, params?)` (structure), and `formatLinkMessage(locale, ruleId, params?)` (links) resolve the localized template via the matching `messages/{locale}.ts` file and interpolate `{name}` placeholders. All three fall back to English when the locale isn't bundled.
+- **Rule messages** — `formatMessage(locale, ruleId, params?)` (accessibility), `formatStructureMessage(locale, ruleId, params?)` (structure), `formatLinkMessage(locale, ruleId, params?)` (links), and `formatDeliverabilityMessage(locale, ruleId, params?)` (deliverability) resolve the localized template via the matching `messages/{locale}.ts` file and interpolate `{name}` placeholders. All five fall back to English when the locale isn't bundled.
+
+### 6. Compatibility rule messages
+
+Translate both fields of each `{ message, suggestion }` entry in `compatibility/messages/en.ts`. Preserve `{feature}`, `{unsupported}`, `{partial}`, `{size}`, `{max}`, and the feature placeholders. Keep family/platform labels and the `more` count localized. The formatter returns `{ message, suggestion }`; add the locale file to the existing glob layout.
+
+---
+
+# Deliverability linter
+
+Source: https://docs.templatical.com/quality/deliverability/
+
+`lintDeliverability(content, options?)` checks template JSON for mismatched link text, URL shorteners, raw IP links, and image-led emails with little visible text.
+
+These rules flag content patterns that spam filters and mailbox-provider guidelines name. They don't predict inbox placement: sender reputation, authentication and recipient engagement decide that.
+
+## API
+
+```ts
+import { lintDeliverability } from "@templatical/quality";
+
+const issues = lintDeliverability(content);
+// LintIssue[] with deliverability.* rule IDs
+```
+
+`lintTemplate(content, options?)` also runs these rules by default, after accessibility, structure and links. `link-text-domain-mismatch`, `url-shortener`, and `ip-address-url` default to `warning`; `low-text` defaults to `info`. None has an auto-fix. The [rule catalog](./rule-catalog) gives each trigger and source.
+
+## Options
+
+Set `deliverability: false` to disable the category. `DeliverabilityLintOptions` accepts `rules?: RuleOverrides`, `thresholds?: Partial<DeliverabilityThresholds>`, and `shortenerHosts?: string[]`.
+
+| Option | Default | Effect |
+|---|---|---|
+| `thresholds.minTextLength` | `200` | `deliverability.low-text` fires below this visible-character count when an image-producing block is present. |
+| `shortenerHosts` | `DEFAULT_SHORTENER_HOSTS` | Replaces the host list used by `deliverability.url-shortener`. |
+
+```ts
+import { DEFAULT_SHORTENER_HOSTS, lintDeliverability } from "@templatical/quality";
+
+const issues = lintDeliverability(content, {
+  deliverability: {
+    thresholds: { minTextLength: 250 },
+    shortenerHosts: [...DEFAULT_SHORTENER_HOSTS, "go.example.com"],
+  },
+});
+```
+
+A rule override such as `{ rules: { "deliverability.low-text": "off" } }` changes one rule without disabling the category. See [Options](../options) for the full `LintOptions` contract.
+
+## Limits
+
+The linter reads template JSON, not the sent message. It cannot predict inbox placement or inspect sender reputation, authentication, recipient engagement, unsubscribe headers or an ESP footer. It cannot inspect client compatibility, Gmail clipping, or rendered HTML size. A sending service can rewrite an href for click tracking after this check. A `custom` block suppresses `low-text` because its rendered HTML is absent from the JSON.
+
+## Check it
+
+Save this valid template as `template.json`:
+
+```json
+{"blocks":[{"id":"button_1","type":"button","text":"Open the report","url":"https://bit.ly/x","backgroundColor":"#1d4ed8","textColor":"#ffffff","borderRadius":6,"fontSize":16,"buttonPadding":{"top":14,"right":28,"bottom":14,"left":28},"align":"center","styles":{"padding":{"top":0,"right":0,"bottom":0,"left":0}}}],"settings":{"width":600,"backgroundColor":"#ffffff","textColor":"#111111","fontFamily":"Arial, sans-serif","linkUnderline":true,"locale":"en"}}
+```
+
+```bash
+npx @templatical/template-tools validate template.json --json
+```
+
+The built CLI returns exit code `0`. Its JSON output includes this issue (produced from the template above):
+
+```json
+{"blockId":"button_1","ruleId":"deliverability.url-shortener","severity":"warning","message":"This link goes through the URL shortener bit.ly. Spam filters treat shortener links with suspicion because they hide the destination. Link to the destination instead."}
+```
+
+For pass-through HTML and CSS support, see the [compatibility linter](../compatibility/).
+
+---
+
+# Deliverability rule catalog
+
+Source: https://docs.templatical.com/quality/deliverability/rule-catalog
+
+This catalog lists when `deliverability.link-text-domain-mismatch`, `deliverability.url-shortener`, `deliverability.ip-address-url`, and `deliverability.low-text` fire, what they skip, and why. They are advisory and have no auto-fixes. [Options](../options) can change a rule's severity or disable the category.
+
+## `deliverability.link-text-domain-mismatch`
+
+**Default severity:** `warning`.
+
+**What fires:** An anchor, button or menu-item has a whole-label URL or hostname whose site differs from its HTTP(S) destination. `example.co.uk` linked to `evil.co.uk` fires. Subdomains of one registrable domain pass; an explicit multi-part suffix list avoids treating `co.uk` as a site.
+
+**What doesn't:** A matching address label, a sentence containing a domain, image-link alt text, non-HTTP(S) hrefs, and a host with merge tags. A copy-link fallback with text equal to its href passes. ESP click tracking may rewrite the href after send and create a mismatch this JSON check cannot see.
+
+**Why it's flagged:** Rspamd's phishing module compares visible URL text with the destination and emits `PHISHED_URL` for a mismatch. [Google's sender guidelines](https://support.google.com/a/answer/81126) say body links should be visible and easy to understand. [Rspamd phishing module](https://docs.rspamd.com/modules/phishing/).
+
+## `deliverability.url-shortener`
+
+**Default severity:** `warning`.
+
+**What fires:** Any URL occurrence with a configured shortener host or its subdomain, including `bit.ly`, `www.bit.ly` and `sub.bit.ly`. `shortenerHosts` replaces the default list; spread `DEFAULT_SHORTENER_HOSTS` to extend it.
+
+**What doesn't:** Other hosts such as `notbit.ly`, non-HTTP(S) URLs, and a default host removed by a replacement list. The rule does not follow redirects or decide whether the destination is safe.
+
+**Why it's flagged:** Shortened destinations conceal where a click goes and shortener domains can appear on URL blocklists. [Rspamd's phishing examples](https://docs.rspamd.com/modules/phishing/) include a `t.co` redirect when visible text shows another site. Google's sender guidelines do not specifically ban URL shorteners.
+
+## `deliverability.ip-address-url`
+
+**Default severity:** `warning`.
+
+**What fires:** An HTTP(S) URL whose host is IPv4 or IPv6, including private IPs and all-digit IPv4 forms normalized by `URL`.
+
+**What doesn't:** `127.0.0.0/8`, `0.0.0.0` and `[::1]` (covered by `link.localhost-or-staging`), domain names, non-HTTP(S) URLs, and unparseable URLs.
+
+**Why it's flagged:** SpamAssassin names `NORMAL_HTTP_TO_IP` and `NUMERIC_HTTP_ADDR` URI tests for IP-address links. [SpamAssassin URI rules](https://svn.apache.org/repos/asf/spamassassin/branches/b2_4_0/rules/20_uri_tests.cf).
+
+## `deliverability.low-text`
+
+**Default severity:** `info`.
+
+**What fires:** A template has an image with nonempty `src`, a video, or a countdown, and fewer than `thresholds.minTextLength` visible text characters (`200` by default). Text comes from title, paragraph, HTML and table-cell content, button text, and menu-item text, including nested sections. Merge tags count as written.
+
+**What doesn't:** Templates without image-producing blocks, templates meeting the threshold, or templates with any `custom` block: its HTML is unavailable in the JSON. The rule does not evaluate display conditions or per-viewport visibility.
+
+**Why it's flagged:** SpamAssassin has `HTML_IMAGE_ONLY_*` text-byte bands and `HTML_IMAGE_RATIO_*` rules. The 200-character setting is a conservative content cue, not a conversion of those byte thresholds. Readers who block images otherwise see little content. Microsoft 365 does not use SpamAssassin; this evidence is most relevant to rule-based filters such as corporate gateways and smaller ISPs. [SpamAssassin HTML rules](https://svn.apache.org/repos/asf/spamassassin/branches/b2_6_0/rules/20_html_tests.cf).
 
 ---
 
@@ -13004,15 +13865,15 @@ Source: https://docs.templatical.com/quality/headless-usage
 
 `@templatical/quality` is JSON-only and has no DOM dependency, so the same linters run in any Node.js context: CI, build pipelines, server-side validation, batch jobs.
 
-`lintTemplate(content, options?)` runs every linter — accessibility, structure, and links — and returns the merged `LintIssue[]`. It's the recommended entry point: one call, and any future linter category is included automatically.
+`lintTemplate(content, options?)` runs every linter — accessibility, structure, links, deliverability, and compatibility — and returns the merged `LintIssue[]`. It's the recommended entry point: one call, and any future linter category is included automatically.
 
 ```ts
 import { lintTemplate } from "@templatical/quality";
 
-const issues = lintTemplate(content); // a11y, then structure, then link issues
+const issues = lintTemplate(content); // a11y, then structure, then link, then deliverability issues
 ```
 
-The per-linter functions — `lintAccessibility(content, options?)`, `lintStructure(content, options?)`, `lintLinks(content, options?)` — return the same shape and stay exported for when you want to run only a subset. You can also run a subset through `lintTemplate` by disabling categories: `lintTemplate(content, { structure: false, links: false })` runs accessibility only.
+The per-linter functions — `lintAccessibility(content, options?)`, `lintStructure(content, options?)`, `lintLinks(content, options?)`, `lintDeliverability(content, options?)`, `lintCompatibility(content, options?)` — return the same shape and stay exported for when you want to run only a subset. You can also run a subset through `lintTemplate` by disabling categories: `lintTemplate(content, { structure: false, links: false, deliverability: false, compatibility: false })` runs accessibility only.
 
 ## Validate before storing
 
@@ -13073,13 +13934,14 @@ Run via `tsx scripts/lint-templates.ts` and wire it into your CI workflow. The T
 
 ## Filtering by category
 
-Rule IDs are namespaced (`a11y.*`, `structure.*`, `link.*`), so grouping or filtering by linter is a `startsWith` check:
+Rule IDs are namespaced (`a11y.*`, `structure.*`, `link.*`, `deliverability.*`, `compat.*`), so grouping or filtering by linter is a `startsWith` check:
 
 ```ts
 const issues = lintTemplate(content);
 const a11y = issues.filter((i) => i.ruleId.startsWith("a11y."));
 const structural = issues.filter((i) => i.ruleId.startsWith("structure."));
 const links = issues.filter((i) => i.ruleId.startsWith("link."));
+const deliverability = issues.filter((i) => i.ruleId.startsWith("deliverability."));
 ```
 
 ## Custom severity policy
@@ -13127,7 +13989,7 @@ for (const { url, blockId, source } of walkUrls(content)) {
 }
 ```
 
-If you'd like your custom rule to participate in the orchestrator alongside the built-ins (severity overrides, localized messages, the editor Issues panel), implement the `Rule` interface — `block` / `template` return a `RuleHit` (`blockId`, optional `params`, optional `fix`) and the orchestrator combines it with the rule's `meta` and the active locale's message template. The same `runRules` helper powers `lintAccessibility`, `lintStructure`, and `lintLinks`, and `lintTemplate` simply fans out to all three.
+If you'd like your custom rule to participate in the orchestrator alongside the built-ins (severity overrides, localized messages, the editor Issues panel), implement the `Rule` interface — `block` / `template` return a `RuleHit` (`blockId`, optional `params`, optional `fix`, `clients`, `excerpt`) and the orchestrator combines it with the rule's `meta` and the active locale's message template. The same `runRules` helper powers `lintAccessibility`, `lintStructure`, `lintLinks`, and `lintDeliverability`, and `lintCompatibility`, and `lintTemplate` fans out to all five.
 
 ---
 
@@ -13135,7 +13997,7 @@ If you'd like your custom rule to participate in the orchestrator alongside the 
 
 Source: https://docs.templatical.com/quality/
 
-`@templatical/quality` is the umbrella package for Templatical's template-quality tooling — deterministic, JSON-only linters that catch authoring mistakes inside the editor and in headless / CI checks. MIT-licensed, ESM, no Vue, no DOM.
+`@templatical/quality` is the umbrella package for Templatical's template-quality tooling — deterministic linters that catch authoring mistakes inside the editor and in headless / CI checks. MIT-licensed, ESM, no Vue, no DOM.
 
 ## Linters
 
@@ -13144,14 +14006,16 @@ Source: https://docs.templatical.com/quality/
 | **[Accessibility](./accessibility/)** | Missing alt text, low contrast, vague CTAs, heading-skip, undersized touch targets, ALL CAPS body, target=_blank missing rel, missing preheader, … | mostly error/warning |
 | **[Structure](./structure/)** | Duplicate block IDs, sections with the wrong column count, nested sections, empty sections, empty columns, heroes that render as regular sections, background images Outlook on Windows can't layer | mostly error; some warning |
 | **[Links](./links/)** | Dangerous URL schemes (`javascript:`), unsupported protocols, malformed `mailto:` / `tel:`, relative URLs, staging / localhost URLs leaking into a template | mostly warning; `link.javascript-protocol` is error |
+| **[Deliverability](./deliverability/)** | Mismatched URL-shaped link text, shortener links, IP-address links, and image-led emails with little text | warning or info |
+| **[Compatibility](./compatibility/)** | Client-breaking pass-through HTML and CSS, plus compiled Gmail size | warning or info |
 
-All three linters return the same `LintIssue` shape and share the same options surface (`LintOptions`) — so consumers can run them in any combination, merge results, and filter by `ruleId` prefix (`a11y.*`, `structure.*`, `link.*`) when grouping. Each linter's per-rule severities and tool-specific knobs live under its own namespace (`accessibility`, `structure`, `links`); set any of them to `false` to disable that linter entirely.
+All five linters return the same `LintIssue` shape and share the same options surface (`LintOptions`) — so consumers can run them in any combination, merge results, and filter by `ruleId` prefix (`a11y.*`, `structure.*`, `link.*`, `deliverability.*`, `compat.*`) when grouping. Each linter's per-rule severities and tool-specific knobs live under its own namespace (`accessibility`, `structure`, `links`, `deliverability`, `compatibility`); set any of them to `false` to disable that linter entirely.
 
-**Run everything in one call.** `lintTemplate(content, options?)` is the single aggregate entry point — it runs all three linters and returns the merged `LintIssue[]` (accessibility, then structure, then links). Reach for it by default; the per-linter functions stay exported for when you want to run just a subset. To skip a category, set its key to `false`: `lintTemplate(content, { structure: false })`. See [Headless usage](./headless-usage).
+**Run everything in one call.** `lintTemplate(content, options?)` is the single aggregate entry point — it runs all five linters and returns the merged `LintIssue[]` (accessibility, then structure, then links, then deliverability, then compatibility). Reach for it by default; the per-linter functions stay exported for when you want to run just a subset. To skip a category, set its key to `false`: `lintTemplate(content, { structure: false })`. See [Headless usage](./headless-usage).
 
 ## Architecture
 
-<svg viewBox="0 0 640 280" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:640px;margin:1.5em auto;display:block;">
+<svg viewBox="0 0 640 370" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:640px;margin:1.5em auto;display:block;">
   <defs>
     <marker id="ah-quality" markerWidth="8" markerHeight="6" refX="4" refY="3" orient="auto">
       <path d="M0,0 L8,3 L0,6" fill="#94a3b8"/>
@@ -13164,7 +14028,7 @@ All three linters return the same `LintIssue` shape and share the same options s
   <text x="100" y="76" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">from the editor or DB</text>
   <!-- Arrow -->
   <line x1="190" y1="50" x2="225" y2="50" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah-quality)"/>
-  <!-- Step 2: Engines (three boxes stacked) -->
+  <!-- Step 2: Engines (five boxes stacked) -->
   <rect x="230" y="2" width="180" height="30" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="8"/>
   <text x="320" y="16" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">lintAccessibility()</text>
   <text x="320" y="28" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#92400e" text-anchor="middle">a11y.* rules</text>
@@ -13174,26 +14038,32 @@ All three linters return the same `LintIssue` shape and share the same options s
   <rect x="230" y="74" width="180" height="30" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="8"/>
   <text x="320" y="88" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">lintLinks()</text>
   <text x="320" y="100" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#92400e" text-anchor="middle">link.* rules</text>
+  <rect x="230" y="110" width="180" height="30" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="8"/>
+  <text x="320" y="124" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">lintDeliverability()</text>
+  <text x="320" y="136" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#92400e" text-anchor="middle">deliverability.* rules</text>
   <!-- Arrow -->
+  <rect x="230" y="146" width="180" height="30" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" rx="8"/>
+  <text x="320" y="160" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">lintCompatibility()</text>
+  <text x="320" y="172" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#92400e" text-anchor="middle">compat.* rules</text>
   <line x1="410" y1="50" x2="445" y2="50" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah-quality)"/>
   <!-- Step 3: Output -->
   <rect x="450" y="10" width="180" height="80" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" rx="10"/>
   <text x="540" y="36" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#1e293b" text-anchor="middle">LintIssue[]</text>
-  <text x="540" y="58" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">severity · message ·</text>
-  <text x="540" y="74" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">blockId · optional fix</text>
+  <text x="540" y="58" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">severity · message · suggestion ·</text>
+  <text x="540" y="74" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">reference · blockId · optional fix</text>
   <!-- Divider -->
-  <line x1="30" y1="130" x2="610" y2="130" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="6 4"/>
-  <text x="320" y="155" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#64748b" text-anchor="middle">Consumed by</text>
+  <line x1="30" y1="205" x2="610" y2="205" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="6 4"/>
+  <text x="320" y="230" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="600" fill="#64748b" text-anchor="middle">Consumed by</text>
   <!-- Consumer chips -->
-  <rect x="40" y="180" width="160" height="60" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="8"/>
-  <text x="120" y="206" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">Issues panel</text>
-  <text x="120" y="224" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">editor sidebar</text>
-  <rect x="240" y="180" width="160" height="60" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="8"/>
-  <text x="320" y="206" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">Canvas badges</text>
-  <text x="320" y="224" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">per-block icons</text>
-  <rect x="440" y="180" width="160" height="60" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="8"/>
-  <text x="520" y="206" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">Headless / CI</text>
-  <text x="520" y="224" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">stored templates</text>
+  <rect x="40" y="255" width="160" height="60" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <text x="120" y="281" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">Issues panel</text>
+  <text x="120" y="299" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">editor sidebar</text>
+  <rect x="240" y="255" width="160" height="60" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <text x="320" y="281" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">Canvas badges</text>
+  <text x="320" y="299" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">per-block icons</text>
+  <rect x="440" y="255" width="160" height="60" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="8"/>
+  <text x="520" y="281" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">Headless / CI</text>
+  <text x="520" y="299" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">stored templates</text>
 </svg>
 
 The package has no opinion on UI. The editor's `useTemplateLint` composable lazy-imports `@templatical/quality`, runs all linters via the single `lintTemplate` call on debounced content changes, and feeds the merged issues stream into the **Issues** sidebar tab and the per-block canvas badges. `applyFix(issue)` runs each patch through the editor's existing block-update path so fixes land as proper undo entries.
@@ -13246,13 +14116,15 @@ const editor = init({
       rules: { "link.localhost-or-staging": "error" }, // promote before send
       nonProductionHosts: ["*.staging.*", "*.preview.*"],
     },
+    deliverability: { thresholds: { minTextLength: 250 } },
+    compatibility: { thresholds: { maxHtmlBytes: 92_160 } },
   },
 });
 ```
 
 [Open in playground](https://play.templatical.com/scenes/issues)
 
-The Issues tab and inline canvas badges appear automatically once the optional peer is resolved. When `lint.disabled === true` — or when every per-tool key (`accessibility`, `structure`, `links`) is `false` — the editor never lazy-loads the package: no chunk download, no UI surface.
+The Issues tab and inline canvas badges appear automatically once the optional peer is resolved. When `lint.disabled === true` — or when every per-tool key (`accessibility`, `structure`, `links`, `deliverability`, `compatibility`) is `false` — the editor never lazy-loads the package: no chunk download, no UI surface.
 
 Set any single linter to `false` to drop just that tool's rules:
 
@@ -13262,13 +14134,15 @@ init({ container: "#editor", lint: { links: false } });
 
 ## Quick links
 
-- [Options](./options) — `disabled`, `locale`, per-tool `accessibility` / `structure` / `links` namespaces.
+- [Options](./options) — `disabled`, `locale`, per-tool `accessibility` / `structure` / `links` / `deliverability` / `compatibility` namespaces.
 - [Severity & fixes](./severity-and-fixes) — severity model + how auto-fix patches land in the editor.
 - [Headless usage](./headless-usage) — `lintTemplate` + validating stored templates in CI / server save handlers.
 - [Contributing locales](./contributing-locales) — adding rule messages + vague-text dictionaries.
 - [Accessibility linter](./accessibility/) — what it catches, rule catalog.
 - [Structure linter](./structure/) — what it catches, rule catalog.
 - [Links linter](./links/) — what it catches, rule catalog.
+- [Deliverability linter](./deliverability/) — content cues, rule catalog.
+- [Compatibility linter](./compatibility/) — pass-through client support and compiled size.
 
 ---
 
@@ -13320,7 +14194,7 @@ const issues = lintLinks(content); // options is an optional second argument
 // issues: LintIssue[] — each entry has ruleId starting with "link."
 ```
 
-Same signature as `lintAccessibility` and `lintStructure`. Same `LintOptions` shape. Same `LintIssue` return type. You can run all three linters independently or merge results.
+Same signature as `lintAccessibility` and `lintStructure`. Same `LintOptions` shape. Same `LintIssue` return type. You can run all five linters independently or merge results.
 
 In the editor, the `useTemplateLint` composable lazy-imports `@templatical/quality` and runs every linter on every (debounced) content change. Link issues appear in the **Issues** sidebar tab alongside accessibility and structure issues.
 
@@ -13432,7 +14306,7 @@ Each link rule is destructive (strip href / change protocol) and the right answe
 
 Source: https://docs.templatical.com/quality/options
 
-`lintTemplate`, `lintAccessibility`, `lintStructure`, and `lintLinks` all accept the same `LintOptions` shape. Every field is optional.
+`lintTemplate`, `lintAccessibility`, `lintStructure`, `lintLinks`, and `lintDeliverability`, and `lintCompatibility` all accept the same `LintOptions` shape. Every field is optional.
 
 ```ts
 interface LintOptions {
@@ -13441,6 +14315,8 @@ interface LintOptions {
   accessibility?: false | AccessibilityLintOptions;
   structure?: false | StructureLintOptions;
   links?: false | LinksLintOptions;
+  deliverability?: false | DeliverabilityLintOptions;
+  compatibility?: false | CompatibilityLintOptions;
 }
 
 interface AccessibilityLintOptions {
@@ -13457,12 +14333,32 @@ interface LinksLintOptions {
   nonProductionHosts?: string[];
 }
 
+interface CompatibilityLintOptions {
+  rules?: RuleOverrides;
+  thresholds?: Partial<CompatibilityThresholds>;
+}
+
+interface CompatibilityThresholds {
+  maxHtmlBytes: number;
+}
+
+interface DeliverabilityThresholds {
+  minTextLength: number;
+}
+
+interface DeliverabilityLintOptions {
+  rules?: RuleOverrides;
+  thresholds?: Partial<DeliverabilityThresholds>;
+  shortenerHosts?: string[];
+}
+
 type Severity = "error" | "warning" | "info" | "off";
+type RuleOverrides = Record<string, Severity>;
 ```
 
 The same object also gates the editor's `init({ lint })` config — every option here applies to every linter via the shared `useTemplateLint` composable.
 
-Severity overrides and tool-specific knobs (`thresholds`, `nonProductionHosts`) are namespaced under their owning linter, so each linter only sees the config that's relevant to it.
+Severity overrides and tool-specific knobs (`thresholds`, `nonProductionHosts`, `shortenerHosts`) are namespaced under their owning linter, so each linter only sees the config that's relevant to it.
 
 ## `disabled`
 
@@ -13478,7 +14374,7 @@ When `true`:
 Use this when a tenant has explicitly opted out, or to keep the default editor bundle minimal. There's no soft-disable — `disabled: true` is a complete, irreversible-per-instance shut-off.
 
 ::: tip Disabling every linter individually has the same effect
-The editor treats `{ accessibility: false, structure: false, links: false }` as equivalent to `{ disabled: true }`: no chunk download, no sidebar tab, no canvas badges. So you don't need the global flag if every linter is already off.
+The editor treats `{ accessibility: false, structure: false, links: false, deliverability: false, compatibility: false }` as equivalent to `{ disabled: true }`: no chunk download, no sidebar tab, no canvas badges. So you don't need the global flag if every linter is already off.
 :::
 
 ## `locale`
@@ -13494,6 +14390,8 @@ Drives the message templates the linter returns (one file per locale per linter)
 lintAccessibility(content, { locale: "de" });
 lintStructure(content, { locale: "de" });
 lintLinks(content, { locale: "de" });
+lintDeliverability(content, { locale: "de" });
+lintCompatibility(content, { locale: "de" });
 
 // Editor — linter automatically follows the editor locale
 init({ locale: "de" });
@@ -13502,7 +14400,7 @@ init({ locale: "de" });
 ::: warning Editor mode ignores `lint.locale`
 In editor mode the linter locale is **forced** to the editor's `locale` from `init({ locale })`. Setting `lint.locale` has no effect — it's overwritten on the way through.
 
-Headless callers (`lintTemplate(...)` or `lintAccessibility(...)` / `lintStructure(...)` / `lintLinks(...)` directly) keep full control.
+Headless callers (`lintTemplate(...)` or `lintAccessibility(...)` / `lintStructure(...)` / `lintLinks(...)` / `lintDeliverability(...)` / `lintCompatibility(...)` directly) keep full control.
 :::
 
 ::: tip Vague-text dictionaries are cross-locale
@@ -13638,13 +14536,62 @@ lintLinks(content, { links: { nonProductionHosts: [] } });
 
 `DEFAULT_NON_PRODUCTION_HOSTS` is exported as the baseline. See the [links overview](./links/) for more.
 
+## `deliverability`
+
+| Default | `{}` |
+|---|---|
+
+Configuration for `lintDeliverability`. Set `deliverability: false` to disable this category.
+
+```ts
+lintDeliverability(content, { deliverability: false, compatibility: false });
+```
+
+### `deliverability.rules`
+
+Keys are full `deliverability.*` rule IDs. `"off"` disables one rule; other severities override its default. See the [deliverability rule catalog](./deliverability/rule-catalog).
+
+```ts
+lintDeliverability(content, {
+  deliverability: { rules: { "deliverability.low-text": "off" } },
+});
+```
+
+### `deliverability.thresholds.minTextLength`
+
+Default `200` visible characters. `deliverability.low-text` fires below this threshold when an image-producing block exists. A partial override preserves other defaults:
+
+```ts
+lintDeliverability(content, {
+  deliverability: { thresholds: { minTextLength: 250 } },
+});
+```
+
+`DEFAULT_DELIVERABILITY_THRESHOLDS` exports the baseline.
+
+### `deliverability.shortenerHosts`
+
+Replaces `DEFAULT_SHORTENER_HOSTS`. Spread the default to extend it:
+
+```ts
+import { DEFAULT_SHORTENER_HOSTS, lintDeliverability } from "@templatical/quality";
+
+const issues = lintDeliverability(content, {
+  deliverability: { shortenerHosts: [...DEFAULT_SHORTENER_HOSTS, "go.example.com"] },
+});
+```
+
+## `compatibility`
+
+Enabled by default. Set `compatibility: false` to disable client compatibility checks. Full `compat.*` rule IDs in `compatibility.rules` accept severity overrides, including `"off"`. `compatibility.thresholds.maxHtmlBytes` defaults to `92_160` bytes (90 KiB) for `lintCompiledHtml`; it does not affect pass-through scanning. See the [compatibility catalog](./compatibility/rule-catalog).
+
 ---
 
 # Severity & fixes
 
 Source: https://docs.templatical.com/quality/severity-and-fixes
 
-Every linter shares the same severity model and patch shape, so this page covers `lintTemplate`, `lintAccessibility`, `lintStructure`, and `lintLinks` together.
+Every linter shares the same severity model and patch shape, so this page covers `lintTemplate`, `lintAccessibility`, `lintStructure`, `lintLinks`, and `lintDeliverability`, and `lintCompatibility` together.
 
 ## Severity model
 
@@ -13657,13 +14604,15 @@ Every rule emits a `LintIssue` with one of four severities:
 | `info` | Recommendation; not a defect. | No canvas badge, "Info" group. |
 | `off` | Override — disables the rule entirely. | Nothing. |
 
-Severity is configurable per rule via the linter's own `rules` map — `accessibility.rules`, `structure.rules`, `links.rules`. Each rule's documented default is just the baseline.
+Severity is configurable per rule via the linter's own `rules` map — `accessibility.rules`, `structure.rules`, `links.rules`, `deliverability.rules`, `compatibility.rules`. Each rule's documented default is just the baseline.
 
 ```ts
 lintAccessibility(content, {
   accessibility: { rules: { "a11y.text-all-caps": "off" } },
 });
 ```
+
+Every emitted issue has a required `message` (problem), `suggestion` (one action) and absolute `reference` URL. Compatibility findings can also carry affected `clients` and a short `excerpt`; `fix` remains optional. The editor displays the suggestion and a Learn more link.
 
 ## Auto-fix
 
@@ -13707,6 +14656,8 @@ See the **Auto-fix** column in each catalog. Today's auto-fixable rules:
 - Accessibility — `a11y.img-decorative-needs-empty-alt`, `a11y.link-target-blank-no-rel`, `a11y.text-justified`.
 - Structure — `structure.empty-section`.
 - Links — none. Every link rule is destructive to auto-fix (strip the href, change the protocol) and the right answer depends on intent.
+- Deliverability — none.
+- Compatibility — none; the appropriate fallback depends on the authored content. The right URL or text depends on the message and sender.
 
 Auto-fixes are added conservatively — only when the right answer is unambiguous. `structure.empty-column`, for example, has no auto-fix because removing an empty column requires changing the section's `columns` layout, and the right answer (merge into a sibling vs. drop the section vs. change the layout key) depends on intent.
 
@@ -13743,7 +14694,7 @@ const issues = lintStructure(content); // options is an optional second argument
 // issues: LintIssue[] — each entry has ruleId starting with "structure."
 ```
 
-Same signature as `lintAccessibility`. Same `LintOptions` shape. Same `LintIssue` return type. You can run both linters independently or merge results.
+Same signature as `lintAccessibility`. Same `LintOptions` shape. Same `LintIssue` return type. You can run all five linters independently or merge results.
 
 Structure-specific config lives under `LintOptions.structure`. Set `structure: false` to disable the linter entirely.
 
@@ -13753,12 +14704,12 @@ lintStructure(content, {
 });
 ```
 
-In the editor, the `useTemplateLint` composable lazy-imports `@templatical/quality` and runs both linters on every (debounced) content change. Structure issues appear in the **Issues** sidebar tab alongside accessibility issues.
+In the editor, the `useTemplateLint` composable lazy-imports `@templatical/quality` and runs all five linters on every (debounced) content change. Structure issues appear in the **Issues** sidebar tab alongside accessibility issues.
 
 ## Quick links
 
 - [Rule catalog](./rule-catalog) — every structure rule with severity, rationale, and an auto-fix note.
-- [Options](../options) — shared across both linters.
+- [Options](../options) — shared across all five linters.
 - [Severity & fixes](../severity-and-fixes) — how the severity model works and how auto-fix patches are applied.
 - [Headless usage](../headless-usage) — validating stored templates in CI.
 

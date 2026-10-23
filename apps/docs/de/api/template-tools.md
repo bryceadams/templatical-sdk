@@ -17,7 +17,7 @@ Jeder Befehl hat dieselbe Form:
 npx -y @templatical/template-tools <command> [options]
 ```
 
-Mit `--json` gibt jeder Befehl ein einzelnes, parsebares JSON-Dokument auf stdout aus. Als Projekt-Abhängigkeit installiert heißt die ausführbare Datei `templatical`.
+Mit `--json` erscheint ein maschinenlesbares Ergebnis auf stdout, wenn ein Befehl ein Ergebnis erzeugt; Nutzungs- und Tool-Fehler (2, 3) gehen ohne Ergebnisdokument an stderr. Als Projekt-Abhängigkeit installiert heißt die ausführbare Datei `templatical`.
 
 **Pinnen Sie in CI eine exakte Version.** Die CLI und das Blockmodell, gegen das sie validiert (`@templatical/types`), werden gemeinsam veröffentlicht — ein Aufruf ohne Version passt also immer zu sich selbst, kann aber zwischen zwei Durchläufen strenger werden, ohne dass eine Änderung von Ihnen das erklärt. Mit einer gepinnten Version wird ein Versionssprung zu einem überprüfbaren Diff.
 
@@ -25,7 +25,7 @@ Mit `--json` gibt jeder Befehl ein einzelnes, parsebares JSON-Dokument auf stdou
 
 | Befehl | Funktion |
 |---|---|
-| `validate <file>` | Strukturprüfung, dann der Qualitäts-Lint |
+| `validate <file> [--html]` | Strukturprüfung, dann der Qualitäts-Lint |
 | `schema [--out <file>]` | Gibt das Block-JSON-Schema aus |
 | `render <file> [--format mjml\|html] [-o <file>]` | Rendert zu MJML oder zu versandfertigem HTML |
 | `edit <file> --op '<json>'` \| `--ops <file>` | Wendet eine Operation oder einen Batch an und schreibt das Ergebnis |
@@ -67,12 +67,12 @@ Standardmäßig `--format mjml`. `--format html` kompiliert dieses MJML weiter u
 
 ```bash
 npx -y @templatical/template-tools edit emails/welcome.json \
-  --op '{"operation":"updateBlock","data":{"blockId":"button_1","updates":{"backgroundColor":"#1d4ed8"}}}'
+  --op '{"op":"updateBlock","blockId":"button_1","set":{"backgroundColor":"#1d4ed8"}}'
 ```
 
-Eine Operation über `--op '<json>'`, oder ein Batch über `--ops <file>`, das auf ein JSON-Array derselben Form zeigt — nie beides. Jede Operation hat die Form `{ "operation": "<name>", "data": {...} }`, wobei `operation` eine der sieben Operationen ist, die der Editor selbst verwendet: `addBlock`, `updateBlock`, `deleteBlock`, `moveBlock`, `updateSettings`, `setContent`, `updateBlockStyle`.
+Eine Operation über `--op '<json>'`, oder ein Batch über `--ops <file>`, das auf ein JSON-Array derselben Form zeigt — nie beides. Die Operationen sind das Vokabular, das Editor, Collaboration-Backends und Templatical Cloud teilen — `addBlock`, `moveBlock`, `deleteBlock`, `updateBlock`, `updateSettings` und `setContent` —, beschrieben in der [Operations-Referenz](/de/api/operations). Eine Operation in der alten Form `{ "operation", "data" }` wird mit einem Hinweis auf die neue abgelehnt.
 
-Ein Batch ist alles-oder-nichts: Die erste Operation, die abgelehnt würde, stoppt den ganzen Batch, es wird nichts geschrieben, und der Fehler benennt, welche Operation (nach Index) und warum. Selbst wenn jede Operation eines Batches erfolgreich ist, wird das Ergebnis vor dem Schreiben noch einmal strukturell validiert — eine Abfolge, die ein ungültiges Dokument erzeugt, wird abgelehnt, und die Datei bleibt unangetastet. Bei Erfolg überschreibt `edit` `<file>` direkt; es gibt kein `--out`.
+Ein Batch wird der Reihe nach und alles-oder-nichts angewendet: Die erste abgelehnte Operation stoppt den ganzen Batch, es wird nichts geschrieben, und der Fehler nennt die Operation, ihren Code und den Grund (`Operation 2 (updateBlock) was refused: block_missing — …`). Selbst wenn jede Operation eines Batches erfolgreich ist, wird das Ergebnis vor dem Schreiben noch einmal strukturell validiert — eine Abfolge, die ein ungültiges Dokument erzeugt, wird abgelehnt, und die Datei bleibt unangetastet. Bei Erfolg überschreibt `edit` `<file>` direkt; es gibt kein `--out`.
 
 ### `import <file> [--format <fmt>] [--out <name>]` oder `import --list-formats`
 
@@ -130,10 +130,10 @@ Listet jedes Arbeits-Template unter `.templatical/` (oder dem `.templatical/` vo
 
 | Code | Bedeutung |
 |---|---|
-| `0` | Erfolg. `validate` kann trotzdem `warning`-/`info`-Probleme melden — siehe unten. |
-| `1` | Das Template ist ungültig: ein struktureller Fehler, oder ein Lint-Problem mit Schweregrad `error`. Bei `custom-block` ein Problem mit Schweregrad `error` in der Definition oder eine fehlgeschlagene `fetch`-Anfrage. |
-| `2` | Fehlerhafte Nutzung — falsche Flags, ein fehlendes Argument, eine unlesbare oder nicht parsbare Eingabedatei. |
-| `3` | Eine optionale Abhängigkeit ist nicht installiert. Die Fehlermeldung nennt den genauen Installationsbefehl. |
+| `0` | Gültig, ohne Lint-Probleme mit Schweregrad `error` bei `validate`; Erfolg bei anderen Befehlen. |
+| `1` | Ungültige Struktur oder mindestens ein Lint-Problem mit `severity: "error"` (die Ausgabe kann weiterhin `valid: true` enthalten). Bei `custom-block` ein Problem mit Schweregrad `error` in der Definition oder eine fehlgeschlagene `fetch`-Anfrage. |
+| `2` | Fehlbedienung oder ein defektes Tool — falsche Flags, ein fehlendes Argument, unlesbare oder nicht parsbare Eingaben oder ein unerwarteter interner Fehler. |
+| `3` | Eine optionale Abhängigkeit fehlt. Die Fehlermeldung nennt den genauen Installationsbefehl. |
 
 ::: tip Exit-Code 3 ist kein Fehlschlag
 Er bedeutet, dass die CLI ihre Arbeit getan hat und dabei auf einen optionalen Baustein gestoßen ist, ohne den es nicht weitergeht — das Paket `mjml` für `render --format html`, oder ein Konverter-Paket für `import`. Behandeln Sie ihn in jedem Skript oder CI-Schritt anders als `1`/`2`: `3` bedeutet „ein Paket installieren und erneut ausführen", nicht „mit diesem Template stimmt etwas nicht".
@@ -141,11 +141,11 @@ Er bedeutet, dass die CLI ihre Arbeit getan hat und dabei auf einen optionalen B
 
 ## Die `--json`-Ausgabe lesen
 
-Die `--json`-Ausgabe jedes Befehls ist genau ein parsbares Dokument auf stdout — in diesem Modus wird dort sonst nichts geschrieben. Diagnosen, Fortschrittsmeldungen und menschenlesbare Fehler gehen stattdessen auf stderr, in beiden Modi — `<Befehl> --json | jq .` lässt sich also immer gefahrlos pipen.
+Wenn ein Befehl ein Ergebnis erzeugt, gibt `--json` ein parsbares Ergebnisdokument auf stdout aus. Nutzungs- und Tool-Fehler (2, 3) gehen ohne Ergebnisdokument an stderr. Diagnosen und Fortschrittsmeldungen gehen ebenfalls an stderr; prüfen Sie den Exit-Code, bevor Sie stdout verarbeiten.
 
 `validate --json` liefert `{ valid, errors, issues }`. `errors` ist die Liste der Strukturfehler, nur gefüllt, wenn `valid` auf `false` steht. `issues` ist der vollständige Bericht von `@templatical/quality` zum Template — jedes Barrierefreiheits-, Struktur- und Link-Problem, mit dem Schweregrad, den die jeweilige Regel standardmäßig hat (`error`, `warning` oder `info`) — unabhängig davon, ob dieses Problem den Exit-Code beeinflusst hat.
 
-**Der Stolperstein:** `issues.length > 0` bedeutet nicht „das Template ist gescheitert". Die meisten Regeln stehen standardmäßig auf `warning` oder `info` und sind rein beratend. Eine Handvoll — fehlender `alt`-Text bei Bildern, eine `javascript:`-URL, eine doppelte Block-ID, zu geringer Kontrast und ein paar weitere — steht standardmäßig auf `error`, und die lassen den Befehl tatsächlich scheitern: `validate` hat das bereits für Sie berechnet, wofür genau der Exit-Code da ist (`1` bei einem strukturellen Fehler oder einem Problem mit `severity: "error"`, sonst `0`). Ein CI-Skript, das den Build allein deshalb scheitern lässt, weil das `issues`-Array nicht leer ist, weist Templates zurück, die der Befehl selbst als bestanden einstuft. Vertrauen Sie dem Exit-Code — oder dem obersten `valid`-Feld, wenn Sie es im selben Prozess brauchen — statt selbst eine „jedes Problem lässt scheitern"-Prüfung gegen `issues` zu bauen.
+`valid: true` allein bedeutet nicht Exit-Code 0: `valid` beschreibt die strukturelle Gültigkeit, während jedes Lint-Problem mit `severity: "error"` bei `validate` zu Exit-Code 1 führt, mit `valid: true` und einem leeren `errors`-Array. Warnungen und Info-Meldungen ändern den Exit-Code nie. Verwenden Sie den Exit-Code als Ergebnis des Befehls; `issues.length > 0` allein ist kein Fehlerkriterium.
 
 ## Einsatz in CI
 
@@ -206,14 +206,14 @@ import {
   schema,
   validateTemplate,
   runQualityLint,
-  applyOperation,
+  applyOperations,
+  OperationError,
   getColumnCount,
   checkCustomBlock,
   validateCustomBlockDefinition,
   SPECIMEN_STATES,
   type ValidationResult,
   type QualityLintResult,
-  type OperationResult,
   type CustomBlockCheckResult,
   type CustomBlockWorkingFile,
 } from "@templatical/template-tools";
@@ -222,8 +222,7 @@ import {
 - **`schema`** — das generierte JSON-Schema für `TemplateContent`, als einfaches Objekt. Derselbe Inhalt, den der Befehl `schema` ausgibt und den die veröffentlichte Datei `schema.json` (unten) enthält.
 - **`validateTemplate(data: unknown): ValidationResult`** — dieselbe diskriminator-bewusste Strukturprüfung, die `validate` ausführt. Synchron; braucht nur `ajv` und das eingecheckte Schema, keinen Build-Schritt und kein weiteres Workspace-Paket.
 - **`runQualityLint(data: unknown): QualityLintResult`** — der `lintTemplate` von `@templatical/quality`, darübergelegt, unter der Annahme strukturell gültiger Eingabe. In try/catch eingehüllt, sodass ein fehlerhaftes Template den Aufrufer nicht abstürzen lassen kann: `{ issues, error? }`, wobei `error` nur gesetzt ist, wenn der Linter selbst einen Fehler geworfen hat.
-- **`applyOperation(content: TemplateContent, payload: TemplateOperationPayload): OperationResult`** — der reine Reducer hinter `edit --op`. Verändert `content` nie; liefert `{ ok, content, error? }`, wobei `content` bei einer Ablehnung dasselbe Objekt ist, das übergeben wurde, nachweislich unangetastet.
-- **`getColumnCount(layout: ColumnLayout): number`** — Anzahl der Spalten, die ein Section-Layout deklariert: `'1'` → `1`, `'3'` → `3`, alles andere (`'2'`, `'2-1'`, `'1-2'`) → `2`. Spiegelt den identischen Helfer im eigenen Editor von `@templatical/core`, hier neu implementiert, weil dieses Paket core nie importiert — siehe „Verhältnis zu den anderen Paketen" unten.
+- **`applyOperations(content, ops, context?)`**, **`OperationError`** und **`getColumnCount(layout)`** — die Operations-Engine hinter `edit`, aus `@templatical/types` re-exportiert. `applyOperations` liefert ein neues Dokument und verändert `content` nie; ein abgelehnter Batch wirft einen `OperationError` mit `code` und `opIndex`. Siehe die [Operations-Referenz](/de/api/operations).
 - **`checkCustomBlock(data: unknown, options?: CheckCustomBlockOptions): Promise<CustomBlockCheckResult>`** — die Prüfungen, die `custom-block validate` ausführt, mit dem Ergebnis `{ valid, issues }`. Sie nimmt eine JSON-Arbeitsdatei oder das Objekt, das ein Definitionsmodul exportiert, inklusive der `dataSource`-Funktion, sodass dieselbe Prüfung in Ihren eigenen Tests über die ausgelieferten Definitionen laufen kann. Übergeben Sie `compileMjml` in `options`, um die MJML-Kompilierprüfung hinzuzufügen; ohne diese Option wird sie übersprungen.
 - **`validateCustomBlockDefinition(data: unknown): CustomBlockCheckResult`** — nur die Strukturprüfung, synchron. `checkCustomBlock` führt sie zuerst aus.
 - **`SPECIMEN_STATES`** — die Namen der Specimen-Zustände, die `custom-block render --state` akzeptiert.
@@ -242,7 +241,7 @@ Nur für Node (`node:http`, `node:fs`) — ein eigener Subpath, damit ein Bundle
 
 Das rohe, generierte JSON-Schema als `.json`-Datei — importierbar überall, wo Ihr Bundler oder Ihre Laufzeitumgebung JSON laden kann (`import schema from "@templatical/template-tools/schema.json"`, oder außerhalb eines Bundlers mit `fetch`/`fs.readFileSync` gelesen). Inhaltlich identisch mit dem `schema`-Export oben und mit dem, was der Befehl `schema` ausgibt.
 
-**Bauen Sie eine eigene „Mit KI generieren"-Funktion in Ihr Produkt?** Das ist, was Sie dafür brauchen. Der mitgelieferte [Agent Skill](/de/guide/agent-skill) durchläuft genau diese Schleife für einen Coding-Agenten: das Block-Schema als Grounding lesen, ein Template generieren, das Ergebnis validieren und etwaige Fehler an das Modell zurückgeben, bis es besteht. `schema.json` und `validateTemplate` sind die beiden Teile dieser Schleife, die dieses Paket Ihnen direkt an die Hand gibt — geben Sie das Schema an Ihr Modell weiter (ein System-Prompt, eine Tool-Definition, ein Structured-Output-Modus, was auch immer Ihr Anbieter unterstützt), und lassen Sie dessen Ausgabe dann durch `validateTemplate` laufen, bevor Sie ihr vertrauen. Alles andere in diesem Paket ist für diesen Weg irrelevant: `runQualityLint`, `applyOperation` und `./live` setzen alle bereits ein strukturell gültiges Template voraus.
+**Bauen Sie eine eigene „Mit KI generieren"-Funktion in Ihr Produkt?** Das ist, was Sie dafür brauchen. Der mitgelieferte [Agent Skill](/de/guide/agent-skill) durchläuft genau diese Schleife für einen Coding-Agenten: das Block-Schema als Grounding lesen, ein Template generieren, das Ergebnis validieren und etwaige Fehler an das Modell zurückgeben, bis es besteht. `schema.json` und `validateTemplate` sind die beiden Teile dieser Schleife, die dieses Paket Ihnen direkt an die Hand gibt — geben Sie das Schema an Ihr Modell weiter (ein System-Prompt, eine Tool-Definition, ein Structured-Output-Modus, was auch immer Ihr Anbieter unterstützt), und lassen Sie dessen Ausgabe dann durch `validateTemplate` laufen, bevor Sie ihr vertrauen. Alles andere in diesem Paket ist für diesen Weg irrelevant: `runQualityLint`, `applyOperations` und `./live` setzen alle bereits ein strukturell gültiges Template voraus.
 
 ### `@templatical/template-tools/custom-block-schema.json`
 
@@ -252,4 +251,6 @@ Das JSON-Schema für eine Custom-Block-Arbeitsdatei — eine `CustomBlockDefinit
 
 Baut auf drei MIT-Paketen auf, allesamt echte `dependencies` statt Peers, also keines davon optional: `@templatical/types` für das Blockmodell, aus dem das Schema generiert wird, `@templatical/quality` für den Lint, den `validate` darüberlegt, und `@templatical/renderer` für die MJML-Ausgabe, die `render` erzeugt. Es ist nicht der Editor — dieses Paket hat keine visuelle Oberfläche, und nichts darin mountet UI oder fasst ein DOM an.
 
-Es importiert nie `@templatical/core`, das wie Editor und Media-Library unter [FSL-1.1-MIT](/de/license-faq) statt reinem MIT steht. Der Operation-Reducer von `edit` (`applyOperation`) implementiert dieselben Invarianten neu, die die eigenen Editor-Mutatoren von core durchsetzen — allen voran, dass eine Sektion nie in einer Spalte landen kann, weil MJML das Verschachteln von `mj-section` in `mj-column` verbietet —, statt sie zu importieren. Das ist ein echter Wartungsaufwand: Die beiden Implementierungen können auseinanderdriften, weshalb die eigene Testsuite dieses Pakets beide Beschreibungen jeder Invariante gegeneinander prüft. Was das zurückbringt, ist genau das, was die Lizenz dieses Pakets rein MIT hält — sicher über ein bloßes, unauthentifiziertes `npx` auszuführen, ohne Lizenzbedingungen jenseits von MIT abwägen zu müssen.
+Es importiert nie `@templatical/core`, das wie Editor und Media-Library unter [FSL-1.1-MIT](/de/license-faq) statt reinem MIT steht. `edit` verwendet die Operations-Engine aus `@templatical/types`, die unter MIT steht: dieselbe Engine, die die Collaboration des Editors und Templatical Cloud anwenden, über gemeinsame Fixtures mit der von Cloud identisch gehalten. Das hält die Lizenz dieses Pakets rein MIT — sicher über ein bloßes, unauthentifiziertes `npx` auszuführen, ohne Lizenzbedingungen jenseits von MIT abwägen zu müssen.
+
+Mit `validate <file> --html --json` rendert und kompiliert die CLI zusätzlich die E-Mail und liefert `htmlBytes` sowie gegebenenfalls `compat.gmail-clipping`. Dafür wird das optionale `mjml` benötigt; fehlt es, endet der Befehl mit Exit-Code `3` und einem Installationshinweis, ohne JSON-Ausgabe. `compat.*` ist standardmäßig `warning` oder `info` und führt nicht zu Exit-Code `1`. `custom-block validate` verwendet `compat.*` statt der bisherigen Client-Fakten unter `safety.*`; Flex/Grid, Position, SVG, Script, `@import` und externe Stylesheets bleiben dort `error`, während `compat.html-style` deaktiviert ist. Issues enthalten `suggestion` und `reference`, gegebenenfalls auch `clients` und `excerpt`.

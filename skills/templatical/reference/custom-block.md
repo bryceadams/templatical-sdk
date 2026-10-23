@@ -103,7 +103,7 @@ first quote a user types. Mapped values and
 errors are redacted if they echo the secret. Check the recipe once before
 opening the preview (`--values` must be a JSON object):
 
-    npx -y @templatical/template-tools@0.48.0 custom-block fetch .templatical/custom-blocks/<type>.json --values '{"productId":"123"}' --json
+    npx -y @templatical/template-tools@0.49.0 custom-block fetch .templatical/custom-blocks/<type>.json --values '{"productId":"123"}' --json
 
 `unmapped` lists `map` entries the response didn't contain — fix the paths
 before going on. If the variable isn't set, ask the user to export it in the
@@ -115,7 +115,7 @@ their picker.
 
 ## 4. Validate
 
-    npx -y @templatical/template-tools@0.48.0 custom-block validate .templatical/custom-blocks/<type>.json --json
+    npx -y @templatical/template-tools@0.49.0 custom-block validate .templatical/custom-blocks/<type>.json --json
 
 Fix every `error`. Treat `warning`s as defects unless there's a reason —
 say the reason. Never start or reload the preview on an invalid definition. A
@@ -123,14 +123,14 @@ field only the recipe reads (the id it fetches by) counts as used.
 
 To check the rendered output without the browser, render one state to a file:
 
-    npx -y @templatical/template-tools@0.48.0 custom-block render .templatical/custom-blocks/<type>.json --state defaults --format mjml -o .templatical/custom-blocks/<type>.mjml
+    npx -y @templatical/template-tools@0.49.0 custom-block render .templatical/custom-blocks/<type>.json --state defaults --format mjml -o .templatical/custom-blocks/<type>.mjml
 
 ## 5. Live preview
 
 Start it per [live-setup.md](live-setup.md), with the block instead of a
 template:
 
-    npx -y @templatical/template-tools@0.48.0 live --custom-block .templatical/custom-blocks/<type>.json --json
+    npx -y @templatical/template-tools@0.49.0 live --custom-block .templatical/custom-blocks/<type>.json --json
 
 Add `--host .templatical/<template>.json` to show it inside one of their
 templates. The canvas is a specimen sheet: the block with its defaults, with
@@ -210,3 +210,5 @@ With the user's go-ahead, put it in their codebase following
   regress silently.
 
 If there's no repository, hand over the module and the `init()` snippet.
+
+Client support findings from `custom-block validate` use `compat.*` IDs, sourced from [caniemail](https://www.caniemail.com/). Its strict error set is `compat.css-display-flex`, `compat.css-display-grid`, `compat.css-position`, `compat.html-svg`, `compat.html-script`, `compat.css-at-import`, and `compat.html-link`. `compat.html-style` is off here because `safety.style-tag` already covers a template `<style>`; the authoring checks `safety.unscoped-class`, `safety.empty-img-src`, `safety.img-alt`, and `safety.img-width` remain. Other compatibility findings are warning or info. Each issue includes a fix suggestion and reference.

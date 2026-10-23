@@ -177,12 +177,14 @@ See [Blocks Guide](/guide/blocks) for detailed descriptions of each block type.
 ```ts
 interface TitleBlock extends BaseBlock {
   type: 'title';
-  content: string;          // HTML content
-  level: 1 | 2 | 3 | 4;   // H1=36px, H2=28px, H3=22px, H4=18px
-  color: string;
+  content: string;
+  level: HeadingLevel;
+  color?: string;
   textAlign: 'left' | 'center' | 'right';
   fontFamily?: string;
 }
+
+type HeadingLevel = 1 | 2 | 3 | 4;
 ```
 
 ### ParagraphBlock
@@ -190,7 +192,8 @@ interface TitleBlock extends BaseBlock {
 ```ts
 interface ParagraphBlock extends BaseBlock {
   type: 'paragraph';
-  content: string;          // HTML content (all formatting is inline via TipTap)
+  content: string;
+  paragraphSpacing?: number;
 }
 ```
 
@@ -248,12 +251,20 @@ Container for multi-column layouts.
 interface SectionBlock extends BaseBlock {
   type: 'section';
   columns: ColumnLayout;
-  border?: BorderValue;     // absent: no border
-  backgroundImage?: BackgroundImage; // absent: no image; styles.backgroundColor is its fallback
-  hero?: SectionHero;       // absent: a regular section; applies with one column and an image
-  children: Block[][];      // Array of columns, each containing blocks
-  stackOnMobile?: boolean;  // absent/true: columns stack on mobile (MJML default).
-                            // false: rendered as <mj-group> so they stay side-by-side.
+  children: Block[][];
+  stackOnMobile?: boolean;
+  borderRadius?: BorderRadiusValue;
+  border?: BorderValue;
+  backgroundImage?: BackgroundImage;
+  hero?: SectionHero;
+  wrapper?: SectionWrapper;
+}
+
+interface SectionWrapper {
+  backgroundColor?: string;
+  padding?: SpacingValue;
+  borderRadius?: BorderRadiusValue;
+  backgroundImage?: BackgroundImage;
 }
 
 type ColumnLayout = '1' | '2' | '3' | '2-1' | '1-2';
@@ -702,3 +713,7 @@ unsubscribe(); // Remove listener
 ## Storage contracts
 
 `Template`, `TemplatePatch`, `SavedBlockInput`, `CommentsProvider`, `MediaProvider` and the rest of the BYO storage shapes live under [Connect your backend](/backend/). This page is the block model and editor config.
+
+## Operations and collaboration
+
+`Operation` and its six members, `BlockParent`, `OperationErrorCode`, `OperationError`, `applyOperations`, `applyOperationsInPlace` and `getColumnCount` are described in the [Operations reference](/api/operations). The collaboration contract — `CollaborationProvider`, `CollaborationHandlers`, `OperationBatch`, `RevisionedBatch`, `CollaborationActor`, `CollaborationMember`, `BlockLock`, `BlockLockHolder`, `CollaborationConflict` and `CollaborationRemoteChange` — is on [Collaboration](/backend/collaboration). `Template` carries `revision` and `locks` for a collaborating store.

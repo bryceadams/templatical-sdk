@@ -1,7 +1,7 @@
 {
   "name": "@templatical/types",
   "description": "Shared TypeScript types, block factory functions, and event emitter for Templatical email editor",
-  "version": "0.48.0",
+  "version": "0.49.0",
   "bugs": "https://github.com/templatical/sdk/issues",
   "devDependencies": {
     "typescript": "^6.0.3",
@@ -37,6 +37,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "fixtures:manifest": "node scripts/fixtures-manifest.mjs",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"
   },
